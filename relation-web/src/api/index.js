@@ -122,6 +122,23 @@ export const api = {
   // ---------- 图谱 ----------
   graph: (params) => request('/graph' + qs(params)),
 
+  // ---------- 项目 ----------
+  projects: (params) => request('/projects' + qs(params)),
+  project: (id) => request(`/projects/${id}`),
+  createProject: (data) => request('/projects', { method: 'POST', body: data }),
+  updateProject: (id, data) => request(`/projects/${id}`, { method: 'PATCH', body: data }),
+  deleteProject: (id) => request(`/projects/${id}`, { method: 'DELETE' }),
+  projectStats: () => request('/projects/stats'),
+  projectGraph: (id) => request(`/projects/${id}/graph`),
+  projectCandidates: (id, keyword) =>
+    request(`/projects/${id}/candidates` + qs({ keyword })),
+  addProjectMember: (id, data) =>
+    request(`/projects/${id}/members`, { method: 'POST', body: data }),
+  updateProjectMember: (id, mid, data) =>
+    request(`/projects/${id}/members/${mid}`, { method: 'PATCH', body: data }),
+  removeProjectMember: (id, mid) =>
+    request(`/projects/${id}/members/${mid}`, { method: 'DELETE' }),
+
   // ---------- 批量管理 ----------
   batchDeletePersons: (ids) => request('/persons/batch-delete', { method: 'POST', body: { ids } }),
 

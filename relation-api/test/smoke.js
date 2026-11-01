@@ -41,8 +41,12 @@ async function main() {
   }
   {
     const { status, data } = await req('GET', '/api/enums');
-    ok('枚举字典', status === 200 && Object.keys(data || {}).length === 8,
-      `${Object.keys(data || {}).length} 组`);
+    const need = ['met_way', 'relation_type', 'power_level', 'org_type',
+      'attr_type', 'scene', 'sensitivity', 'org_relation_type',
+      'project_type', 'project_status', 'project_role'];
+    const missing = need.filter((k) => !data?.[k]?.values);
+    ok('枚举字典', status === 200 && missing.length === 0,
+      `${Object.keys(data || {}).length} 组${missing.length ? '，缺 ' + missing.join(',') : ''}`);
   }
 
   // ---------- 联系人 ----------
@@ -306,6 +310,114 @@ async function main() {
   {
     const { status, data } = await raw('/api/import/execute', tplBuf);
     ok('空表导入被拒', status === 400, data?.error);
+  }
+
+  console.log('\n【项目】');
+  let projectId = null;
+  let memberId = null;
+  {
+    const { status, data } = await req('GET', '/api/projects');
+    ok('项目列表', status === 200 && data.total >= 2, `${data?.total} 个`);
+    projectId = data.items[0].id;
+  }
+  {
+    const { status, data } = await req('GET', '/api/projects/stats');
+    ok('项目概览', status === 200 && data.total >= 2,
+      `在推进 ${data?.active} · 参与人 ${data?.members}`);
+  }
+  {
+    const { status } = await req('POST', '/api/projects', { name: '   ' });
+    ok('项目名必填', status === 400);
+  }
+  {
+    const { status } = await req('POST', '/api/projects', { name: 'x', status: 'bad_status' });
+    ok('项目状态枚举校验', status === 400);
+  }
+  {
+    const { status, data } = await req('POST', '/api/projects', {
+      name: '冒烟测试项目', project_type: 'enterprise', status: 'planning',
+      our_role: '顾问', amount: 300, is_key: true,
+    });
+    ok('新建项目', status === 201 && data.ok, `id=${data?.id}`);
+    projectId = data.id;
+  }
+  {
+    const personId = (await req('GET', '/api/persons?limit=5')).data.items.find((x) => !x.is_self).id;
+    const { status, data } = await req('POST', `/api/projects/${projectId}/members`, {
+      person_id: personId, role_type: 'leader', role_title: '牵头人', duty: '统筹', is_key: true,
+    });
+    ok('项目加成员', status === 201 && data.ok, `id=${data?.id}`);
+    memberId = data.id;
+
+    const again = await req('POST', `/api/projects/${projectId}/members`, {
+      person_id: personId, role_type: 'advisor',
+    });
+    ok('同一人重复加改为更新', again.status === 200 && again.data.updated === true);
+
+    const bad = await req('POST', `/api/projects/${projectId}/members`, {
+      person_id: personId, role_type: 'boss',
+    });
+    ok('项目角色枚举校验', bad.status === 400);
+
+    const ghost = await req('POST', `/api/projects/${projectId}/members`, { person_id: 999999 });
+    ok('不存在的联系人被拒', ghost.status === 400);
+  }
+  {
+    const { status, data } = await req('GET', `/api/projects/${projectId}`);
+    ok('项目详情含成员与中文角色', status === 200 && data.members.length === 1
+      && data.members[0].role_label === '顾问专家', `${data?.member_count} 人`);
+  }
+  {
+    const { status, data } = await req('GET', `/api/projects/${projectId}/candidates`);
+    ok('候选人员池', status === 200 && Array.isArray(data.items) && data.items.length > 0,
+      `${data?.items?.length} 人`);
+  }
+  {
+    const list = (await req('GET', '/api/persons?limit=5')).data.items;
+    const extra = list.filter((x) => !x.is_self).slice(0, 2).map((x) => ({
+      person_id: x.id, role_type: 'technical',
+    }));
+    const { status, data } = await req('POST', `/api/projects/${projectId}/members/batch`, {
+      members: [...extra, { person_id: 999999, role_type: 'other' }],
+    });
+    ok('批量加成员（含无效 id）', status === 200 && data.summary.failed === 1,
+      `新增 ${data?.summary?.added} · 跳过 ${data?.summary?.skipped} · 失败 ${data?.summary?.failed}`);
+  }
+  {
+    const { status } = await req('PATCH', `/api/projects/${projectId}/members/${memberId}`, {
+      role_type: 'approver', role_title: '终审',
+    });
+    ok('修改成员角色', status === 200);
+  }
+  {
+    const { status, data } = await req('GET', `/api/projects/${projectId}/graph`);
+    const hasProjectNode = data.nodes.some((n) => n.kind === 'project');
+    const hasRoleEdge = data.edges.some((e) => e.kind === 'project' && e.label);
+    ok('项目局部图谱', status === 200 && hasProjectNode && hasRoleEdge,
+      `${data?.nodes?.length} 节点 / ${data?.edges?.length} 连接`);
+  }
+  {
+    const memberRow = (await req('GET', `/api/projects/${projectId}`)).data.members[0];
+    const { status, data } = await req("GET", `/api/projects?person_id=${memberRow.person_id}`);
+    ok('按人反查项目', status === 200 && data.total >= 1, `${data?.total} 个`);
+
+    const person = (await req("GET", `/api/persons/${memberRow.person_id}`)).data;
+    ok('人员详情带参与项目', Array.isArray(person.projects) && person.projects.length >= 1,
+      `${person?.projects?.length} 个`);
+  }
+  {
+    const { status, data } = await req('GET', '/api/graph');
+    ok('全图带项目节点', status === 200 && data.nodes.some((n) => n.kind === 'project'),
+      `${data?.nodes?.filter((n) => n.kind === 'project').length} 个项目节点`);
+  }
+  {
+    const del = await req('DELETE', `/api/projects/${projectId}/members/${memberId}`);
+    ok('移除项目成员', del.status === 200 && del.data.deleted === 1);
+  }
+  {
+    const del = await req('DELETE', `/api/projects/${projectId}`);
+    const gone = await req('GET', `/api/projects/${projectId}`);
+    ok('删除项目并级联', del.status === 200 && gone.status === 404);
   }
 
   console.log('\n【批量管理】');

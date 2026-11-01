@@ -19,6 +19,7 @@ import orgsRouter from './routes/orgs.js';
 import relationsRouter from './routes/relations.js';
 import graphRouter from './routes/graph.js';
 import importRouter from './routes/import.js';
+import projectsRouter from './routes/projects.js';
 
 const PORT = Number(process.env.PORT) || 3100;
 const HOST = process.env.HOST || '0.0.0.0';
@@ -62,6 +63,7 @@ async function bootstrap() {
   app.use('/api/relations', relationsRouter);
   app.use('/api/graph', graphRouter);
   app.use('/api/import', importRouter);
+  app.use('/api/projects', projectsRouter);
 
   // 生产环境托管前端静态文件
   const webDist = join(ROOT, '../relation-web/dist');

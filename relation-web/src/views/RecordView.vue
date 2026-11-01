@@ -3,6 +3,7 @@ import { ref, computed, onMounted } from 'vue';
 import { useRouter } from 'vue-router';
 import { showToast, showSuccessToast } from 'vant';
 import api from '@/api';
+import OrgInput from '@/components/OrgInput.vue';
 
 const router = useRouter();
 
@@ -21,10 +22,6 @@ const enums = ref({});
 const saving = ref(false);
 const showMore = ref(false);
 
-// 单位联想
-const orgSuggestions = ref([]);
-let orgTimer = null;
-
 const canSave = computed(() => form.value.name.trim().length > 0);
 
 const powerOptions = computed(() =>
@@ -33,25 +30,6 @@ const powerOptions = computed(() =>
 const metOptions = computed(() =>
   Object.entries(enums.value.met_way?.values || {}).map(([value, text]) => ({ text, value }))
 );
-
-async function fetchOrg(q) {
-  if (!q || q.length < 1) { orgSuggestions.value = []; return; }
-  try {
-    const r = await api.orgs({ q, limit: 8 });
-    orgSuggestions.value = r.items || [];
-  } catch { orgSuggestions.value = []; }
-}
-
-function onOrgInput(v) {
-  form.value.org_name = v;
-  clearTimeout(orgTimer);
-  orgTimer = setTimeout(() => fetchOrg(v), 220);
-}
-
-function pickOrg(o) {
-  form.value.org_name = o.name;
-  orgSuggestions.value = [];
-}
 
 async function save() {
   if (!canSave.value) return;
@@ -110,28 +88,14 @@ onMounted(async () => {
           />
         </label>
 
-        <!-- 单位（带联想） -->
-        <label class="field">
+        <!-- 单位（带已填单位联想） -->
+        <div class="field">
           <span class="field-label">单位</span>
-          <input
-            :value="form.org_name"
-            class="input"
-            placeholder="公司 / 政府单位"
-            autocomplete="off"
-            @input="onOrgInput($event.target.value)"
+          <OrgInput
+            v-model="form.org_name"
+            placeholder="公司 / 政府单位，点一下可选已填过的"
           />
-          <div v-if="orgSuggestions.length" class="suggest">
-            <div
-              v-for="o in orgSuggestions"
-              :key="o.id"
-              class="suggest-item"
-              @click="pickOrg(o)"
-            >
-              <span class="grow ellipsis">{{ o.name }}</span>
-              <span class="muted">{{ o.person_count }} 人</span>
-            </div>
-          </div>
-        </label>
+        </div>
 
         <label class="field">
           <span class="field-label">职务</span>
@@ -266,34 +230,6 @@ onMounted(async () => {
 }
 
 .textarea { resize: vertical; line-height: 1.55; }
-
-.suggest {
-  position: absolute;
-  top: 100%;
-  left: 0;
-  right: 0;
-  z-index: 30;
-  background: #fff;
-  border: 1px solid var(--c-border);
-  border-radius: 10px;
-  box-shadow: var(--shadow-lg);
-  margin-top: 4px;
-  max-height: 220px;
-  overflow-y: auto;
-}
-
-.suggest-item {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 10px 13px;
-  font-size: 14px;
-  cursor: pointer;
-  border-bottom: 1px solid var(--c-border);
-}
-
-.suggest-item:last-child { border-bottom: 0; }
-.suggest-item:active { background: var(--c-primary-light); }
 
 .chips { display: flex; flex-wrap: wrap; gap: 7px; }
 

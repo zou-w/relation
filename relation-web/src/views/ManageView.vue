@@ -3,6 +3,7 @@ import { ref, computed, onMounted } from 'vue';
 import { useRouter } from 'vue-router';
 import { showToast, showSuccessToast, showConfirmDialog, showLoadingToast, closeToast } from 'vant';
 import api from '@/api';
+import OrgInput from '@/components/OrgInput.vue';
 
 const router = useRouter();
 
@@ -397,10 +398,10 @@ onMounted(() => {
             <input v-model="form.name" class="input input--lg" placeholder="真实姓名" autocomplete="off" />
           </label>
 
-          <label class="field">
+          <div class="field">
             <span class="field-label">单位</span>
-            <input v-model="form.org_name" class="input" placeholder="公司 / 政府单位全称" autocomplete="off" />
-          </label>
+            <OrgInput v-model="form.org_name" placeholder="点一下可选已填过的单位" />
+          </div>
 
           <div class="two-col">
             <label class="field">

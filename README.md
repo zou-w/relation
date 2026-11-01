@@ -36,7 +36,7 @@
             ↓
      Node.js (Express)  API      ← 57MB 常驻
             ↓
-     SQLite (单文件)             ← 7 张表
+     SQLite (单文件)             ← 9 张表
 ```
 
 | 层 | 选型 | 说明 |
@@ -88,7 +88,7 @@ cd ../relation-api && npm start       # 会自动托管 ../relation-web/dist
 
 ## 四、数据模型
 
-7 张表，三条主线：**人－组织－事件**是骨架，**资源画像**是价值，**关系**是杠杆。
+9 张表，四条主线：**人－组织－事件**是骨架，**资源画像**是价值，**关系**是杠杆，**项目**是事由。
 
 | 表 | 作用 | 关键字段 |
 |---|---|---|
@@ -99,6 +99,8 @@ cd ../relation-api && npm start       # 会自动托管 ../relation-web/dist
 | `relations` | 人↔人 | `strength`（我和他多熟）、`influence`（他对别人话语权） |
 | `contact_events` | 接触记录 | `next_date`（跟进提醒）、`is_done` |
 | `org_relations` | 组织↔组织 | `relation_type` |
+| `projects` | **项目** | `status`（筹备/投标/进行/结项/失单）、`owner_org_id`（业主）、`amount` |
+| `project_members` | 项目参与人 | `role_type`（负责/商务/技术/审批/引荐/顾问）、`role_title`、`duty`、`is_key` |
 
 ### 三个关键设计
 
@@ -111,6 +113,9 @@ cd ../relation-api && npm start       # 会自动托管 ../relation-web/dist
 **3. 资源画像独立建表**
 不塞进 `remark` 文本，才能被结构化检索。这是"借资源"能成立的前提。
 
+**4. 项目是关系的"事由"**
+只记"我认识他"信息量很薄；记成"他在这个项目里负责审批"，关系才有上下文、可被追问、可被复用。一个人在一个项目里只保留一条角色记录，兼任写进 `role_title`。
+
 ---
 
 ## 五、API 一览
@@ -118,7 +123,7 @@ cd ../relation-api && npm start       # 会自动托管 ../relation-web/dist
 ### 基础
 ```
 GET  /api/health              健康检查
-GET  /api/enums               枚举字典（8 组）
+GET  /api/enums               枚举字典（11 组）
 GET  /api/graph/stats         首页统计
 ```
 
@@ -176,10 +181,27 @@ GET  /api/orgs?q=                  组织搜索（支持简称）
 POST /api/orgs                     新建组织
 GET  /api/orgs/:id                 组织详情（含在任人员）
 
-GET  /api/graph?key_only=1         图谱 nodes + edges
+GET  /api/graph?key_only=1         图谱 nodes + edges（默认带项目节点，with_projects=0 可关）
 ```
 
-**共 34 个接口，冒烟测试 46 项全部通过。**
+### 项目
+```
+GET    /api/projects                          项目列表（keyword / status / key_only / person_id / org_id）
+GET    /api/projects/stats                    项目概览（在推进 / 参与人 / 被忽略的关键人）
+POST   /api/projects                          新建项目
+GET    /api/projects/:id                      详情（含成员、角色统计、业主单位）
+PATCH  /api/projects/:id                      编辑
+DELETE /api/projects/:id                      删除（成员级联）
+GET    /api/projects/:id/members              成员列表（详情已含）
+POST   /api/projects/:id/members              加成员（同人重复提交改为更新角色）
+POST   /api/projects/:id/members/batch        批量加成员（返回 added/skipped/failed）
+PATCH  /api/projects/:id/members/:mid         改角色 / 职责 / 关键标记
+DELETE /api/projects/:id/members/:mid         移出项目
+GET    /api/projects/:id/candidates           可选人员池（标记谁已加入）
+GET    /api/projects/:id/graph                单项目局部关系网
+```
+
+**共 46 个接口，冒烟测试 65 项全部通过。**
 
 ---
 
@@ -188,11 +210,13 @@ GET  /api/graph?key_only=1         图谱 nodes + edges
 | 路由 | 页面 | 说明 |
 |---|---|---|
 | `/` | 今日 | 待办（逾期/今日/未来）+ 冷接触 + 统计 + 快捷入口 |
-| `/record` | 快速记录 | 姓名必填其余可后补，单位带联想，3 秒落库 |
+| `/record` | 快速记录 | 姓名必填其余可后补，单位点一下就能选已填过的，3 秒落库 |
 | `/search` | 查人 | 姓名/单位/职务/备注模糊搜，重点人物筛选 |
 | `/resources` | 借资源 | 资源检索 + 圈子渗透度 + 常用标签 |
 | `/person/:id` | 联系人详情 | 任职、资源画像、触达路径、影响力、人际关系、接触时间线 |
-| `/graph` | 关系图 | Cytoscape 图谱，全屏独立页 |
+| `/projects` | 项目 | 项目列表，状态筛选、金额、参与人数与核心角色 |
+| `/project/:id` | 项目详情 | 概览 + 参与人按角色分组 + 加人 + 进项目关系图 |
+| `/graph` | 关系图 | Cytoscape 图谱，全屏独立页；带项目节点，`?project=id` 看单项目 |
 | `/manage` | 管理 | 人员列表、搜索筛选、新增/编辑/删除、批量删除、导入入口 |
 | `/import` | 导入名单 | 三步向导：下载模板 → 上传预检 → 确认入库 |
 
@@ -444,13 +468,18 @@ console.log(db.prepare('SELECT name, phone FROM persons WHERE phone IS NOT NULL'
 接触提醒   ✅ 记录(自动关联单位) / 待办分级 / 冷接触 / 完成 / 校验
 关系       ✅ 本人节点 / 建立 / 枚举校验 / 重复拦截 / 列表
 组织       ✅ 简称搜索 / 详情(含在任人员)
-图谱       ✅ 节点+边 / 边标签中文 / 重点聚焦 / 统计
+图谱       ✅ 节点+边 / 边标签中文 / 重点聚焦 / 统计 / 项目节点
+项目       ✅ 列表 / 概览 / 名称必填 / 状态枚举校验 / 新建
+           ✅ 加成员 / 重复加改为更新 / 角色枚举校验 / 无效联系人拒绝
+           ✅ 详情含中文角色 / 候选池 / 批量加(含无效 id) / 改角色
+           ✅ 局部图谱(项目节点+角色边) / 按人反查项目 / 人员详情带项目
+           ✅ 全图含项目节点 / 移除成员 / 删除并级联
 Excel 导入 ✅ 模板下载(28KB) / 中文件名 / 字段清单 / 空表拒绝
            ✅ 非 xlsx 拒绝 / 空表导入拒绝
 批量管理   ✅ 空 ids 拒绝 / 本人节点保护
 清理       ✅ 级联删除
 
-46/46 通过
+65/65 通过
 ```
 
 实测输出示例：
@@ -485,7 +514,7 @@ relation-api/
 ├── src/
 │   ├── server.js           入口
 │   ├── db/
-│   │   ├── schema.sql      7 张表
+│   │   ├── schema.sql      9 张表
 │   │   ├── driver.js       双驱动封装
 │   │   ├── init.js         建表
 │   │   └── seed.js         演示数据
@@ -493,10 +522,11 @@ relation-api/
 │   │   ├── crypto.js       AES-256-GCM + 密钥持久化
 │   │   ├── enums.js        枚举字典 + 中文标签反解
 │   │   ├── queries.js      核心查询（资源/路径/影响力/图谱）
+│   │   ├── projects.js     项目查询（列表/详情/成员/局部图谱）
 │   │   ├── excel-template.js  模板生成（样式/批注/下拉/说明页）
 │   │   └── excel-parse.js     模板解析与逐行校验
-│   └── routes/             persons / resources / events / orgs / relations / graph / import
-└── test/smoke.js           46 项冒烟测试
+│   └── routes/             persons / resources / events / orgs / relations / graph / import / projects
+└── test/smoke.js           65 项冒烟测试
 
 docs/
 └── import-template.xlsx    导入模板快照（权威版本以 API 为准）

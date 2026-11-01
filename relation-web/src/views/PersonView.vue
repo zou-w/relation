@@ -235,6 +235,31 @@ onMounted(load);
           </div>
         </template>
 
+        <!-- 参与项目 -->
+        <template v-if="person.projects?.length">
+          <div class="section-title">参与项目</div>
+          <div class="card list-card">
+            <div
+              v-for="pj in person.projects"
+              :key="pj.id"
+              class="list-item list-item--tap"
+              @click="router.push(`/project/${pj.id}`)"
+            >
+              <div class="pj-ico"><van-icon name="bag-o" /></div>
+              <div class="grow">
+                <div class="item-title">
+                  {{ pj.name }}
+                  <span v-if="pj.is_key" class="tag tag--warn">重点</span>
+                </div>
+                <div class="muted ellipsis">
+                  {{ pj.owner_org_name || '未填业主单位' }} · {{ pj.status_label }}
+                </div>
+              </div>
+              <span class="tag">{{ pj.role_label }}</span>
+            </div>
+          </div>
+        </template>
+
         <!-- 资源画像 -->
         <div class="section-title">
           资源画像
@@ -505,6 +530,19 @@ onMounted(load);
 .list-item:last-child { border-bottom: 0; }
 .list-item--tap { cursor: pointer; }
 .list-item--tap:active { opacity: .6; }
+
+.pj-ico {
+  width: 32px;
+  height: 32px;
+  border-radius: 9px;
+  background: var(--c-primary-light);
+  color: var(--c-primary);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 15px;
+  flex-shrink: 0;
+}
 
 .item-title { font-weight: 600; font-size: 14.5px; display: flex; align-items: center; gap: 6px; }
 

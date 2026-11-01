@@ -20,6 +20,18 @@ const routes = [
     meta: { title: '借资源', nav: true },
   },
   {
+    path: '/projects',
+    name: 'projects',
+    component: () => import('@/views/ProjectsView.vue'),
+    meta: { title: '项目', nav: true },
+  },
+  {
+    path: '/project/:id',
+    name: 'project',
+    component: () => import('@/views/ProjectView.vue'),
+    meta: { title: '项目详情' },
+  },
+  {
     path: '/graph',
     name: 'graph',
     component: () => import('@/views/GraphView.vue'),

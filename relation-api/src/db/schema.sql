@@ -1,7 +1,8 @@
 -- ============================================================
 -- 人脉关系网 · 数据库结构 (SQLite)
--- 7 张表：persons / organizations / employments / person_attributes
+-- 9 张表：persons / organizations / employments / person_attributes
 --         relations / contact_events / org_relations
+--         projects / project_members
 -- 幂等设计：可重复执行
 -- ============================================================
 
@@ -149,3 +150,51 @@ CREATE TABLE IF NOT EXISTS org_relations (
 
 CREATE INDEX IF NOT EXISTS idx_orgrel_from ON org_relations(from_org);
 CREATE INDEX IF NOT EXISTS idx_orgrel_to   ON org_relations(to_org);
+
+-- ------------------------------------------------------------
+-- 8. projects  项目（人脉的"事由"，把关系落到具体合作上）
+-- ------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS projects (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  name          TEXT    NOT NULL,
+  code          TEXT,                          -- 项目编号 / 招标编号
+  project_type  TEXT    NOT NULL DEFAULT 'other',  -- gov_tender|enterprise|research|other
+  status        TEXT    NOT NULL DEFAULT 'active', -- planning|bidding|active|closed|lost
+  owner_org_id  INTEGER REFERENCES organizations(id) ON DELETE SET NULL, -- 业主 / 甲方
+  our_role      TEXT,                          -- 我方角色：总包/分包/投标/顾问
+  region        TEXT,
+  amount        REAL,                          -- 金额（万元）
+  start_date    TEXT,
+  end_date      TEXT,
+  milestone     TEXT,                          -- 当前阶段 / 关键节点
+  is_key        INTEGER NOT NULL DEFAULT 0,    -- 1 = 重点项目
+  remark        TEXT,
+  owner_id      TEXT    NOT NULL DEFAULT 'me',
+  created_at    TEXT    NOT NULL DEFAULT (datetime('now','localtime')),
+  updated_at    TEXT    NOT NULL DEFAULT (datetime('now','localtime'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_proj_name   ON projects(name);
+CREATE INDEX IF NOT EXISTS idx_proj_status ON projects(status);
+CREATE INDEX IF NOT EXISTS idx_proj_owner  ON projects(owner_org_id);
+
+-- ------------------------------------------------------------
+-- 9. project_members  项目参与人（人 ↔ 项目的桥，带角色）
+-- ------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS project_members (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  project_id  INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  person_id   INTEGER NOT NULL REFERENCES persons(id) ON DELETE CASCADE,
+  role_type   TEXT    NOT NULL DEFAULT 'other', -- leader|business|technical|approver|resource|advisor|other
+  role_title  TEXT,                            -- 自定义角色名，如"评标委员会成员"
+  duty        TEXT,                            -- 在这个项目里具体做什么
+  is_key      INTEGER NOT NULL DEFAULT 0,      -- 1 = 项目里的关键人
+  note        TEXT,
+  created_at  TEXT    NOT NULL DEFAULT (datetime('now','localtime'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_pm_project ON project_members(project_id);
+CREATE INDEX IF NOT EXISTS idx_pm_person  ON project_members(person_id);
+-- 一个人在一个项目里只保留一条角色记录，兼任写进 role_title
+CREATE UNIQUE INDEX IF NOT EXISTS uk_pm_person
+  ON project_members(project_id, person_id);

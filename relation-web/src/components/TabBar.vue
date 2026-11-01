@@ -9,12 +9,13 @@ const tabs = [
   { name: 'today', path: '/', label: '今日', icon: 'calendar-o' },
   { name: 'search', path: '/search', label: '查人', icon: 'search' },
   { name: 'resources', path: '/resources', label: '借资源', icon: 'gift-o' },
+  { name: 'projects', path: '/projects', label: '项目', icon: 'bag-o' },
   { name: 'graph', path: '/graph', label: '关系图', icon: 'cluster-o' },
   { name: 'manage', path: '/manage', label: '管理', icon: 'friends-o' },
 ];
 
 const show = computed(() => route.meta.nav === true);
-const active = computed(() => route.name);
+const active = computed(() => (route.name === 'project' ? 'projects' : route.name));
 
 const go = (path) => {
   if (route.path !== path) router.push(path);
@@ -76,8 +77,8 @@ const go = (path) => {
   padding: 0;
 }
 
-.tab-icon { font-size: 21px; transition: transform .18s ease; }
-.tab-label { font-size: 10.5px; font-weight: 500; letter-spacing: .01em; }
+.tab-icon { font-size: 19px; transition: transform .18s ease; }
+.tab-label { font-size: 9.5px; font-weight: 500; letter-spacing: -.01em; white-space: nowrap; }
 
 .tab.active { color: var(--c-primary); }
 .tab.active .tab-icon { transform: translateY(-1px) scale(1.06); }
@@ -85,7 +86,7 @@ const go = (path) => {
 
 @media (min-width: 768px) {
   .tabbar-inner { height: 62px; }
-  .tab-icon { font-size: 22px; }
-  .tab-label { font-size: 11.5px; }
+  .tab-icon { font-size: 21px; }
+  .tab-label { font-size: 11px; }
 }
 </style>

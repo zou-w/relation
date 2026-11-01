@@ -89,6 +89,38 @@ export const ENUMS = {
       competition: '竞争关系',
     },
   },
+  project_type: {
+    label: '项目类型',
+    values: {
+      gov_tender: '政府招投标',
+      enterprise: '企业合作',
+      research: '课题研究',
+      internal: '内部建设',
+      other: '其他',
+    },
+  },
+  project_status: {
+    label: '项目状态',
+    values: {
+      planning: '筹备中',
+      bidding: '投标中',
+      active: '进行中',
+      closed: '已结项',
+      lost: '已失单',
+    },
+  },
+  project_role: {
+    label: '项目角色',
+    values: {
+      leader: '项目负责人',
+      business: '商务对接',
+      technical: '技术负责',
+      approver: '审批把关',
+      resource: '资源引荐',
+      advisor: '顾问专家',
+      other: '其他参与',
+    },
+  },
 };
 
 /** 校验枚举值是否合法 */

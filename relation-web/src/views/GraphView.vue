@@ -9,12 +9,17 @@
  * 5. 移动端加大触摸命中区
  */
 import { ref, onMounted, onBeforeUnmount, shallowRef, computed, nextTick } from 'vue';
-import { useRouter } from 'vue-router';
+import { useRoute, useRouter } from 'vue-router';
 import { showToast } from 'vant';
 import cytoscape from 'cytoscape';
 import api from '@/api';
 
+const route = useRoute();
 const router = useRouter();
+
+/** ?project=id 时只看单个项目的关系网 */
+const projectId = Number(route.query.project) || null;
+const projectName = ref('');
 
 const container = ref(null);
 const cy = shallowRef(null);
@@ -30,6 +35,7 @@ const theme = {
   key: { bg: '#fef3c7', border: '#f59e0b', text: '#92400e' },
   self: { bg: '#059669', border: '#047857', text: '#ffffff' },
   org: { bg: '#eef4ff', border: '#bfdbfe', text: '#1e40af' },
+  project: { bg: '#fff7ed', border: '#fb923c', text: '#9a3412' },
   edgeRel: '#94a3b8',
   edgeEmp: '#cbd5e1',
 };
@@ -40,10 +46,14 @@ function buildElements(data) {
     const isSelf = n.isSelf;
     const isKey = n.isKey;
     const isOrg = n.kind === 'org';
+    const isProject = n.kind === 'project';
+    const label = isProject && n.label.length > 15
+      ? `${n.label.slice(0, 14)}…`
+      : n.label;
     return {
       data: {
         id: n.id,
-        label: n.label,
+        label,
         kind: n.kind,
         isSelf: isSelf ? 1 : 0,
         isKey: isKey ? 1 : 0,
@@ -51,9 +61,9 @@ function buildElements(data) {
         raw: n,
       },
       classes: [
-        isOrg ? 'org' : 'person',
+        isProject ? 'project' : isOrg ? 'org' : 'person',
         isSelf ? 'self' : '',
-        isKey ? 'key' : '',
+        isKey && !isProject && !isOrg ? 'key' : '',
       ].filter(Boolean).join(' '),
     };
   });
@@ -67,7 +77,7 @@ function buildElements(data) {
       kind: e.kind,
       strength: e.strength,
     },
-    classes: e.kind === 'employment' ? 'edge-emp' : 'edge-rel',
+    classes: e.kind === 'employment' ? 'edge-emp' : e.kind === 'project' ? 'edge-proj' : 'edge-rel',
   }));
 
   return [...nodes, ...edges];
@@ -90,7 +100,8 @@ function fitView(instance, { padTop = 96, padBottom = 92, maxScale = 2.0 } = {})
   nodes.forEach((n) => {
     const p = n.position();
     const hw = (n.width() || 40) / 2 + 6;
-    const hh = (n.height() || 40) / 2 + 26; // 下方标签占位
+    // 项目节点标签在内部，只留一点点余量
+    const hh = (n.height() || 40) / 2 + (n.hasClass('project') ? 10 : 26);
     x0 = Math.min(x0, p.x - hw);
     x1 = Math.max(x1, p.x + hw);
     y0 = Math.min(y0, p.y - (n.height() || 40) / 2 - 6);
@@ -101,8 +112,10 @@ function fitView(instance, { padTop = 96, padBottom = 92, maxScale = 2.0 } = {})
   const bbH = Math.max(y1 - y0, 1);
 
   const isMobile = w < 768;
+  // 移动端底部有 tabbar + 横排图例，需要额外留白，否则节点会被压住
+  const padB = isMobile ? Math.max(padBottom, 128) : Math.max(padBottom, 96);
   const availW = Math.max(w - (isMobile ? 40 : 120), 120);
-  const availH = Math.max(h - padTop - padBottom, 120);
+  const availH = Math.max(h - padTop - padB, 120);
 
   const level = Math.max(Math.min(availW / bbW, availH / bbH, maxScale), 0.25);
   instance.zoom({ level });
@@ -118,22 +131,30 @@ function fitView(instance, { padTop = 96, padBottom = 92, maxScale = 2.0 } = {})
 
 /** 布局并锁定 */
 function applyLayout(instance) {
-  const layout = instance.layout({
+  // 力导向：只算一次。项目视角节点少，加大斥力让结构散得开
+  const opts = {
     name: 'cose',
     animate: false,           // 不做动画，一次性算完，避免掉帧
     fit: false,               // 自己算视口，更可控
     padding: 40,
-    nodeRepulsion: () => 90000,
-    idealEdgeLength: (edge) => (edge.data('kind') === 'employment' ? 60 : 120),
+    nodeRepulsion: () => (projectId ? 160000 : 90000),
+    idealEdgeLength: (edge) => {
+      const k = edge.data('kind');
+      if (k === 'employment') return 60;
+      if (k === 'project') return projectId ? 150 : 130;
+      return 120;
+    },
     edgeElasticity: () => 90,
     nestingFactor: 1.2,
-    gravity: 0.6,             // 加大向心力，避免节点被推到远处
-    numIter: 1200,
-    initialTemp: 200,
+    gravity: 0.45,            // 向心力小一点，避免节点全挤到一起
+    numIter: 1400,
+    initialTemp: 220,
     coolingFactor: 0.95,
     minTemp: 1.0,
     randomize: true,
-  });
+  };
+
+  const layout = instance.layout(opts);
   layout.run();
 
   fitView(instance);
@@ -200,7 +221,7 @@ function initCy(data) {
           'border-width': 3,
           width: 62,
           height: 62,
-          color: theme.self.text,
+          color: '#065f46',
           'font-weight': 700,
           'font-size': 15,
         },
@@ -229,6 +250,28 @@ function initCy(data) {
         },
       },
       {
+        selector: 'node.project',
+        style: {
+          'background-color': theme.project.bg,
+          'background-opacity': 1,
+          'border-color': theme.project.border,
+          'border-width': 2,
+          width: 104,
+          height: 42,
+          shape: 'round-rectangle',
+          'text-valign': 'center',
+          'text-halign': 'center',
+          'text-margin-y': 0,
+          'text-wrap': 'wrap',
+          'text-max-width': 86,
+          'text-outline-width': 0,
+          color: theme.project.text,
+          'font-size': 9,
+          'font-weight': 700,
+          'min-zoomed-font-size': 7,
+        },
+      },
+      {
         selector: 'edge',
         style: {
           width: 1.4,
@@ -246,6 +289,23 @@ function initCy(data) {
           'line-style': 'dashed',
           opacity: 0.6,
           'curve-style': 'bezier',
+        },
+      },
+      {
+        selector: 'edge.edge-proj',
+        style: {
+          width: 1.2,
+          'line-color': '#fdba74',
+          'line-style': 'dashed',
+          opacity: 0.85,
+          'curve-style': 'bezier',
+          label: 'data(label)',
+          'font-size': 8,
+          color: '#c2410c',
+          'text-background-color': '#fff7ed',
+          'text-background-opacity': 0.95,
+          'text-background-padding': 1.5,
+          'min-zoomed-font-size': 8,
         },
       },
       {
@@ -338,6 +398,12 @@ async function openDetail(node) {
     showDetail.value = false;
     return;
   }
+  // 项目节点：直接进项目详情，不在图谱里开抽屉
+  if (raw.kind === 'project') {
+    showDetail.value = false;
+    router.push(`/project/${String(raw.id).replace('j', '')}`);
+    return;
+  }
   showDetail.value = true;
   detail.value = { base: raw, neighbors: [], loaded: false };
 
@@ -359,7 +425,14 @@ async function openDetail(node) {
 async function load() {
   loading.value = true;
   try {
-    const data = await api.graph({ key_only: keyOnly.value ? 1 : undefined, limit: 300 });
+    let data;
+    if (projectId) {
+      const g = await api.projectGraph(projectId);
+      projectName.value = g.project?.name || '';
+      data = { nodes: g.nodes, edges: g.edges };
+    } else {
+      data = await api.graph({ key_only: keyOnly.value ? 1 : undefined, limit: 300 });
+    }
     await nextTick();
     // 容器需要已渲染
     requestAnimationFrame(() => initCy(data));
@@ -436,9 +509,15 @@ onBeforeUnmount(() => {
     <!-- 顶部工具条 -->
     <div class="topbar">
       <div class="topbar-inner">
-        <h1>关系图</h1>
+        <div class="tb-left">
+          <van-icon v-if="projectId" name="arrow-left" class="tb-back" @click="router.back()" />
+          <div class="tb-titles">
+            <h1>{{ projectId ? '项目关系图' : '关系图' }}</h1>
+            <div v-if="projectId && projectName" class="tb-proj ellipsis">{{ projectName }}</div>
+          </div>
+        </div>
         <div class="row gap-6">
-          <button class="pill" :class="{ 'pill--on': keyOnly }" @click="toggleKey">
+          <button v-if="!projectId" class="pill" :class="{ 'pill--on': keyOnly }" @click="toggleKey">
             <van-icon name="star-o" />
             只看重点
           </button>
@@ -458,6 +537,15 @@ onBeforeUnmount(() => {
       <van-loading size="24px" color="#2563eb">加载关系网…</van-loading>
     </div>
 
+    <!-- 空态 -->
+    <div v-else-if="!stats.nodes" class="cy-empty">
+      <van-icon name="cluster-o" class="ce-icon" />
+      <div class="ce-title">{{ projectId ? '这个项目还没有标记参与人' : '还没有关系网' }}</div>
+      <div class="ce-hint">
+        {{ projectId ? '回项目详情点「加人」，把参与人标进来' : '先录入几位联系人，关系图会自动生成' }}
+      </div>
+    </div>
+
     <!-- 右下角控制 -->
     <div class="ctrls">
       <button class="ctrl" @click="zoom(1)"><van-icon name="plus" /></button>
@@ -471,6 +559,7 @@ onBeforeUnmount(() => {
       <span class="lg"><i class="dot dot--key"></i>重点</span>
       <span class="lg"><i class="dot dot--person"></i>联系人</span>
       <span class="lg"><i class="dot dot--org"></i>单位</span>
+      <span class="lg"><i class="dot dot--proj"></i>项目</span>
     </div>
 
     <!-- 节点详情抽屉 -->
@@ -555,6 +644,16 @@ onBeforeUnmount(() => {
   pointer-events: auto;
 }
 
+.tb-left { display: flex; align-items: center; gap: 7px; min-width: 0; }
+.tb-back { font-size: 19px; color: var(--c-text-2); cursor: pointer; flex-shrink: 0; }
+.tb-titles { min-width: 0; }
+.tb-proj {
+  font-size: 11px;
+  color: var(--c-text-3);
+  max-width: 52vw;
+  margin-top: 1px;
+}
+
 .topbar h1 {
   margin: 0;
   font-size: 20px;
@@ -591,6 +690,24 @@ onBeforeUnmount(() => {
   color: var(--c-warning);
   font-weight: 600;
 }
+
+.cy-empty {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  z-index: 5;
+  padding: 0 40px;
+  text-align: center;
+  pointer-events: none;
+}
+
+.ce-icon { font-size: 46px; color: var(--c-border); margin-bottom: 4px; }
+.ce-title { font-size: 14.5px; font-weight: 600; color: var(--c-text-2); }
+.ce-hint { font-size: 12px; color: var(--c-text-3); line-height: 1.6; }
 
 .cy-loading {
   position: absolute;
@@ -653,6 +770,26 @@ onBeforeUnmount(() => {
 .dot--key { background: #fef3c7; border: 1.5px solid #f59e0b; }
 .dot--person { background: #fff; border: 1.5px solid #c7d2e5; }
 .dot--org { background: #eef4ff; border: 1.5px dashed #bfdbfe; border-radius: 3px; }
+.dot--proj { background: #fff7ed; border: 1.5px solid #fb923c; border-radius: 3px; }
+
+/* 移动端图例横排，避免压住左下角节点 */
+@media (max-width: 767px) {
+  .legend {
+    left: 12px;
+    right: 12px;
+    bottom: calc(66px + var(--safe-bottom));
+    flex-direction: row;
+    align-items: center;
+    justify-content: center;
+    flex-wrap: wrap;
+    gap: 4px 11px;
+    padding: 6px 8px;
+  }
+  .lg { font-size: 10px; }
+  .dot { width: 8px; height: 8px; }
+  /* 控制按钮抬到图例上方，避免被压住 */
+  .ctrls { bottom: calc(112px + var(--safe-bottom)); }
+}
 
 /* 节点抽屉 */
 .node-sheet {

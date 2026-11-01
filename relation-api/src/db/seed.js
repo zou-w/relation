@@ -13,6 +13,8 @@ createSchema();
 
 // 幂等：清空后重灌（保留结构）
 transaction(() => {
+  run('DELETE FROM project_members');
+  run('DELETE FROM projects');
   run('DELETE FROM contact_events');
   run('DELETE FROM person_attributes');
   run('DELETE FROM relations');
@@ -169,11 +171,60 @@ transaction(() => {
 
   ev(personId.li, orgId.housing, '2026-07-28', 'call',
      '咨询资质增项材料清单', null, null, 1);
+
+  // ---------- 项目（把关系落到具体事由上） ----------
+  const prj = (name, code, type, status, ownerOrg, ourRole, region, amount, start, end, milestone, isKey, remark) =>
+    run(
+      `INSERT INTO projects
+         (name, code, project_type, status, owner_org_id, our_role, region, amount,
+          start_date, end_date, milestone, is_key, remark)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      [name, code, type, status, ownerOrg, ourRole, region, amount, start, end, milestone, isKey, remark]
+    ).lastInsertRowid;
+
+  const prjEpcc = prj(
+    '城东片区老旧小区改造 EPC 项目', 'HZ-EPC-2026-018', 'gov_tender', 'active',
+    orgId.housing, '总包', '杭州', 8600, '2026-03-01', '2027-06-30',
+    '施工许可已批复，进入消防设计审查', 1,
+    '体量最大的在建项目，卡点在消防审查排期'
+  );
+
+  const prjFund = prj(
+    '2027 年产业扶持资金申报', 'HZ-FUND-2027-006', 'gov_tender', 'bidding',
+    orgId.ndrc, '申报方', '杭州', 1200, '2026-09-01', '2027-03-31',
+    '材料初稿已完成，等待处室初审', 1,
+    '赵敏牵头初审，需要她认可项目落地成效'
+  );
+
+  // ---------- 项目成员（谁在项目里担什么角色） ----------
+  const member = (projectId, pid, role, roleTitle, duty, isKey) =>
+    run(
+      `INSERT INTO project_members (project_id, person_id, role_type, role_title, duty, is_key)
+       VALUES (?,?,?,?,?,?)`,
+      [projectId, pid, role, roleTitle || null, duty || null, isKey ? 1 : 0]
+    );
+
+  member(prjEpcc, personId.me, 'leader', '项目总协调',
+    '对内统筹投标与履约，对外维护主管单位关系', 1);
+  member(prjEpcc, personId.zhang, 'approver', '分管副局长',
+    '消防设计审查与施工许可的最终签批', 1);
+  member(prjEpcc, personId.li, 'technical', '工程处对接人',
+    '资质与施工许可材料审核、现场检查安排', 0);
+  member(prjEpcc, personId.liu, 'resource', '协会引荐',
+    '通过协会推荐两家分包单位，协调行业专家', 0);
+
+  member(prjFund, personId.me, 'leader', null,
+    '申报主体负责人，负责材料统筹与答辩', 1);
+  member(prjFund, personId.zhao, 'approver', '投资处初审',
+    '项目核准与资金额度初审', 1);
+  member(prjFund, personId.zhang, 'advisor', '政策顾问',
+    '从建筑市场监管角度提供政策口径建议', 0);
 });
 
 const count = (t) => get(`SELECT COUNT(*) AS c FROM ${t}`).c;
 console.log('✅ 演示数据已写入');
 console.log(`   联系人 ${count('persons')} · 组织 ${count('organizations')} · 任职 ${count('employments')}`);
 console.log(`   资源画像 ${count('person_attributes')} · 关系 ${count('relations')} · 接触事件 ${count('contact_events')}`);
+console.log(`   项目 ${count('projects')} · 项目成员 ${count('project_members')}`);
 console.log(`   驱动: ${driver}`);
 closeDB();

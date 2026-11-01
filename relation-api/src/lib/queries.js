@@ -4,6 +4,8 @@
  */
 import { all, get, run } from '../db/driver.js';
 import { decrypt, maskPhone } from './crypto.js';
+import { enumLabel } from './enums.js';
+import { personProjects } from './projects.js';
 
 /** 把联系人行解密并补充当前任职信息 */
 function hydratePerson(row, opts = {}) {
@@ -104,6 +106,13 @@ export function getPerson(id) {
     'SELECT * FROM contact_events WHERE person_id = ? ORDER BY event_date DESC LIMIT 50',
     [id]
   );
+
+  // 参与的项目：项目是把关系落地的事由，详情页要能看到
+  person.projects = personProjects(id).map((p) => ({
+    ...p,
+    status_label: enumLabel('project_status', p.status),
+    role_label: enumLabel('project_role', p.role_type),
+  }));
 
   return person;
 }
@@ -332,7 +341,7 @@ export function coldContacts(days = 30) {
  * 6. 关系网图谱
  * ============================================================ */
 
-export function graphData({ keyOnly = false, limit = 200 } = {}) {
+export function graphData({ keyOnly = false, limit = 200, withProjects = true } = {}) {
   const personWhere = keyOnly ? 'WHERE p.is_key_contact = 1 OR p.is_self = 1' : '';
   const persons = all(
     `SELECT p.id, p.name, p.is_key_contact, p.is_self, p.title,
@@ -375,6 +384,43 @@ export function graphData({ keyOnly = false, limit = 200 } = {}) {
     persons.map((p) => p.id)
   );
 
+  // 项目节点：只带成员落在当前节点集里的项目，避免出现悬空边
+  const projectNodes = [];
+  const projectEdges = [];
+  if (withProjects && persons.length) {
+    const pids = persons.map((p) => p.id);
+    const rows = all(
+      `SELECT pr.id AS project_id, pr.name, pr.status, pr.is_key,
+              pm.id AS member_id, pm.person_id, pm.role_type, pm.role_title
+         FROM projects pr
+         JOIN project_members pm ON pm.project_id = pr.id
+        WHERE pm.person_id IN (${pids.map(() => '?').join(',')})`,
+      pids
+    );
+
+    const seen = new Map();
+    for (const r of rows) {
+      if (!seen.has(r.project_id)) {
+        seen.set(r.project_id, {
+          id: `j${r.project_id}`,
+          kind: 'project',
+          label: r.name,
+          status: r.status,
+          isKey: !!r.is_key,
+        });
+      }
+      projectEdges.push({
+        id: `jm${r.member_id}`,
+        source: `p${r.person_id}`,
+        target: `j${r.project_id}`,
+        kind: 'project',
+        label: r.role_title || enumLabel('project_role', r.role_type),
+        roleType: r.role_type,
+      });
+    }
+    projectNodes.push(...seen.values());
+  }
+
   const nodes = [
     ...persons.map((p) => ({
       id: `p${p.id}`,
@@ -392,6 +438,7 @@ export function graphData({ keyOnly = false, limit = 200 } = {}) {
       orgType: o.org_type,
       isKey: !!o.is_key_org,
     })),
+    ...projectNodes,
   ];
 
   const edges = [
@@ -412,6 +459,7 @@ export function graphData({ keyOnly = false, limit = 200 } = {}) {
       label: e.position || '',
       powerLevel: e.power_level,
     })),
+    ...projectEdges,
   ];
 
   return { nodes, edges };
@@ -428,5 +476,6 @@ export function stats() {
     events: one('SELECT COUNT(*) FROM contact_events'),
     pending: one('SELECT COUNT(*) FROM contact_events WHERE is_done = 0 AND next_date IS NOT NULL'),
     resources: one('SELECT COUNT(*) FROM person_attributes'),
+    projects: one('SELECT COUNT(*) FROM projects'),
   };
 }

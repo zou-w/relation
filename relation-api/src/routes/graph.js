@@ -8,10 +8,12 @@ const router = Router();
 
 /** 图谱数据：nodes + edges */
 router.get('/', (req, res) => {
-  const { key_only, limit } = req.query;
+  const { key_only, limit, with_projects } = req.query;
   const data = graphData({
     keyOnly: key_only === '1' || key_only === 'true',
     limit: Math.min(Number(limit) || 200, 1000),
+    // 默认带项目节点；显式传 0 可关掉
+    withProjects: with_projects !== '0',
   });
 
   // 补上中文标签，前端直接用
