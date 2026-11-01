@@ -18,16 +18,9 @@ function hydratePerson(row, opts = {}) {
  * 1. 联系人
  * ============================================================ */
 
-export function findPersons({ keyword, keyOnly, orgId, limit = 50 }) {
-  let sql = `
-    SELECT p.*,
-           (SELECT o.name FROM employments e JOIN organizations o ON o.id = e.org_id
-            WHERE e.person_id = p.id AND e.is_current = 1 LIMIT 1) AS org_name,
-           (SELECT e.position FROM employments e
-            WHERE e.person_id = p.id AND e.is_current = 1 LIMIT 1) AS position
-    FROM persons p
-    WHERE 1=1
-  `;
+/** 拼装联系人筛选条件，findPersons 与 countPersons 共用 */
+function personWhere({ keyword, keyOnly, orgId, hasAttr, missingPhone } = {}) {
+  let sql = ' WHERE 1=1';
   const params = [];
 
   if (keyword) {
@@ -45,11 +38,39 @@ export function findPersons({ keyword, keyOnly, orgId, limit = 50 }) {
               WHERE e3.person_id = p.id AND e3.org_id = ? AND e3.is_current = 1)`;
     params.push(orgId);
   }
+  if (hasAttr) {
+    sql += ' AND EXISTS (SELECT 1 FROM person_attributes pa WHERE pa.person_id = p.id)';
+  }
+  if (missingPhone) {
+    sql += " AND (p.phone IS NULL OR p.phone = '') AND p.is_self = 0";
+  }
 
-  sql += ' ORDER BY p.is_self DESC, p.is_key_contact DESC, p.updated_at DESC LIMIT ?';
-  params.push(limit);
+  return { sql, params };
+}
 
-  return all(sql, params).map((r) => hydratePerson(r));
+export function findPersons({ keyword, keyOnly, orgId, hasAttr, missingPhone, limit = 50, offset = 0 }) {
+  const where = personWhere({ keyword, keyOnly, orgId, hasAttr, missingPhone });
+
+  const sql = `
+    SELECT p.*,
+           (SELECT o.name FROM employments e JOIN organizations o ON o.id = e.org_id
+            WHERE e.person_id = p.id AND e.is_current = 1 LIMIT 1) AS org_name,
+           (SELECT e.position FROM employments e
+            WHERE e.person_id = p.id AND e.is_current = 1 LIMIT 1) AS position,
+           (SELECT COUNT(*) FROM person_attributes pa WHERE pa.person_id = p.id) AS attr_count
+    FROM persons p
+    ${where.sql}
+    ORDER BY p.is_self DESC, p.is_key_contact DESC, p.updated_at DESC, p.id DESC
+    LIMIT ? OFFSET ?
+  `;
+
+  return all(sql, [...where.params, limit, offset]).map((r) => hydratePerson(r));
+}
+
+/** 与 findPersons 同条件的总数，用于分页 */
+export function countPersons(opts = {}) {
+  const where = personWhere(opts);
+  return get(`SELECT COUNT(*) AS n FROM persons p ${where.sql}`, where.params)?.n || 0;
 }
 
 export function getPerson(id) {

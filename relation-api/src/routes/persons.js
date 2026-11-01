@@ -5,7 +5,7 @@ import { Router } from 'express';
 import { all, get, run, transaction } from '../db/driver.js';
 import { encrypt, decrypt, maskPhone } from '../lib/crypto.js';
 import { isValidEnum, enumValues } from '../lib/enums.js';
-import { findPersons, getPerson, ensureOrg } from '../lib/queries.js';
+import { findPersons, countPersons, getPerson, ensureOrg } from '../lib/queries.js';
 
 const router = Router();
 
@@ -20,14 +20,30 @@ function checkEnum(field, value, label) {
 
 /* ---------------- 查人 ---------------- */
 router.get('/', (req, res) => {
-  const { keyword, key_only, org_id, limit } = req.query;
-  const rows = findPersons({
-    keyword: keyword?.trim() || null,
-    keyOnly: key_only === '1' || key_only === 'true',
-    orgId: org_id ? Number(org_id) : null,
-    limit: Math.min(Number(limit) || 50, 200),
-  });
-  res.json({ total: rows.length, items: rows });
+  const { keyword, key_only, org_id, has_attr, missing_phone, limit, offset, page, page_size } = req.query;
+
+  const kw = keyword?.trim() || null;
+  const keyOnly = key_only === '1' || key_only === 'true';
+  const hasAttr = has_attr === '1' || has_attr === 'true';
+  const missingPhone = missing_phone === '1' || missing_phone === 'true';
+  const orgId = org_id ? Number(org_id) : null;
+
+  // 两种分页写法都支持：limit/offset 或 page/page_size
+  let size;
+  let skip;
+  if (page_size !== undefined) {
+    size = Math.min(Math.max(Number(page_size) || 50, 1), 500);
+    skip = (Math.max(Number(page) || 1, 1) - 1) * size;
+  } else {
+    size = Math.min(Math.max(Number(limit) || 50, 1), 500);
+    skip = Math.max(Number(offset) || 0, 0);
+  }
+
+  const base = { keyword: kw, keyOnly, orgId, hasAttr, missingPhone };
+  const items = findPersons({ ...base, limit: size, offset: skip });
+  const total = countPersons(base);
+
+  res.json({ total, items, page_size: size, offset: skip });
 });
 
 /* ---------------- 快速录入 ---------------- */
@@ -85,6 +101,31 @@ router.post('/', (req, res) => {
   });
 
   res.status(201).json({ ok: true, ...result });
+});
+
+/* ---------------- 批量删除 ---------------- */
+router.post('/batch-delete', (req, res) => {
+  const ids = Array.isArray(req.body?.ids) ? req.body.ids.map(Number).filter(Number.isFinite) : [];
+  if (!ids.length) return res.status(400).json({ error: '请提供要删除的 ids' });
+  if (ids.length > 500) return res.status(400).json({ error: '单次最多删除 500 人' });
+
+  const placeholders = ids.map(() => '?').join(',');
+  // 本人节点保护
+  const selfs = all(`SELECT id FROM persons WHERE id IN (${placeholders}) AND is_self = 1`, ids);
+  const deletable = ids.filter((id) => !selfs.some((s) => s.id === id));
+
+  let deleted = 0;
+  if (deletable.length) {
+    const ph = deletable.map(() => '?').join(',');
+    const info = run(`DELETE FROM persons WHERE id IN (${ph})`, deletable);
+    deleted = info.changes;
+  }
+
+  res.json({
+    ok: true,
+    deleted,
+    skippedSelf: selfs.map((s) => s.id),
+  });
 });
 
 /* ---------------- 详情 ---------------- */

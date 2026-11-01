@@ -261,6 +261,65 @@ async function main() {
     ok('删除联系人（级联清理）', status === 200);
   }
 
+  console.log('\n【Excel 导入】');
+
+  /** 二进制请求，用于上传 xlsx */
+  const raw = async (path, buf, type = 'application/octet-stream') => {
+    const r = await fetch(BASE + path, {
+      method: 'POST',
+      headers: { 'Content-Type': type },
+      body: buf,
+    });
+    let data = null;
+    try { data = await r.json(); } catch { data = null; }
+    return { status: r.status, data, size: Number(r.headers.get('content-length') || 0) };
+  };
+
+  let tplBuf = null;
+  {
+    const r = await fetch(BASE + '/api/import/template');
+    const buf = Buffer.from(await r.arrayBuffer());
+    tplBuf = buf;
+    const isZip = buf[0] === 0x50 && buf[1] === 0x4b;
+    const cd = r.headers.get('content-disposition') || '';
+    ok('下载导入模板', r.status === 200 && isZip && buf.length > 5000,
+      `${(buf.length / 1024).toFixed(0)} KB`);
+    ok('模板带中文文件名', cd.includes('filename*=UTF-8'), cd.slice(0, 48) + '…');
+  }
+  {
+    const { status, data } = await req('GET', '/api/import/fields');
+    const req1 = data?.fields?.filter((f) => f.required).map((f) => f.header);
+    ok('模板字段清单', status === 200 && data.fields.length === 15,
+      `${data?.fields?.length} 列，必填 ${req1?.join('、')}`);
+    ok('字段带填写提示', data?.fields?.every((f) => f.hint?.length > 5));
+  }
+  {
+    const { status, data } = await raw('/api/import/preview', tplBuf);
+    ok('空白模板预检被拒', status === 400 && /没有数据/.test(data?.error || ''), data?.error);
+  }
+  {
+    // 超过 100 字节才会走到魔数校验分支
+    const fake = Buffer.from('x'.repeat(300));
+    const { status, data } = await raw('/api/import/preview', fake);
+    ok('非 xlsx 文件被拒', status === 400 && /xlsx/.test(data?.error || ''), data?.error);
+  }
+  {
+    const { status, data } = await raw('/api/import/execute', tplBuf);
+    ok('空表导入被拒', status === 400, data?.error);
+  }
+
+  console.log('\n【批量管理】');
+  {
+    const { status } = await req('POST', '/api/persons/batch-delete', { ids: [] });
+    ok('批量删除需传 ids', status === 400);
+  }
+  {
+    const selfId = (await req('GET', '/api/persons?key_only=0')).data.items.find((x) => x.is_self)?.id;
+    const { status, data } = await req('POST', '/api/persons/batch-delete', { ids: [selfId] });
+    ok('本人节点不可删除', status === 200 && data.deleted === 0 && data.skippedSelf.includes(selfId),
+      `保护 id=${selfId}`);
+  }
+
   // ---------- 汇总 ----------
   const total = pass + fail;
   console.log(`\n${'─'.repeat(52)}`);

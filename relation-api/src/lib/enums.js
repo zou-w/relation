@@ -111,3 +111,30 @@ export function enumLabel(field, value) {
   if (!def || !value) return value;
   return def.values[value] || value;
 }
+
+/**
+ * 把中文标签（或英文 key）反解成枚举 key
+ * 用于 Excel 导入：模板里给用户看的是中文，入库要存 key
+ * 返回 undefined 表示无法识别
+ */
+export function enumKey(field, value) {
+  if (value === null || value === undefined) return null;
+  const v = String(value).trim();
+  if (!v) return null;
+
+  const def = ENUMS[field];
+  if (!def) return v;
+  // 已经是 key
+  if (Object.prototype.hasOwnProperty.call(def.values, v)) return v;
+  // 中文标签
+  for (const [key, label] of Object.entries(def.values)) {
+    if (label === v) return key;
+  }
+  return undefined;
+}
+
+/** 返回某字段的全部中文标签，用于模板下拉与报错提示 */
+export function enumLabels(field) {
+  const def = ENUMS[field];
+  return def ? Object.values(def.values) : [];
+}

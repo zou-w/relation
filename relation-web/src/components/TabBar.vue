@@ -10,6 +10,7 @@ const tabs = [
   { name: 'search', path: '/search', label: '查人', icon: 'search' },
   { name: 'resources', path: '/resources', label: '借资源', icon: 'gift-o' },
   { name: 'graph', path: '/graph', label: '关系图', icon: 'cluster-o' },
+  { name: 'manage', path: '/manage', label: '管理', icon: 'friends-o' },
 ];
 
 const show = computed(() => route.meta.nav === true);

@@ -46,6 +46,7 @@
 | 前端 | Vue 3 + Vite 5 + Vant 4 | 移动优先，桌面自适应 |
 | 图谱 | Cytoscape.js | Canvas 渲染，手势流畅 |
 | PWA | vite-plugin-pwa | 可安装、离线缓存 |
+| Excel | exceljs | 模板生成（样式/批注/下拉）+ 解析，纯 JS 无原生依赖 |
 
 总内存占用约 **300–500MB**，2G 服务器留足余量。
 
@@ -123,14 +124,23 @@ GET  /api/graph/stats         首页统计
 
 ### 联系人
 ```
-GET    /api/persons                       查人（keyword / key_only / org_id）
+GET    /api/persons                       查人（keyword / key_only / org_id / has_attr / missing_phone / page+page_size）
 POST   /api/persons                       快速录入（自动建组织+任职）
+POST   /api/persons/batch-delete          批量删除（本人节点自动跳过）
 GET    /api/persons/:id                   详情（含任职/画像/关系/接触）
 PATCH  /api/persons/:id                   编辑
 DELETE /api/persons/:id                   删除
 GET    /api/persons/:id/neighbors         一跳邻居（图谱按需加载）
 POST   /api/persons/:id/attributes        资源画像打标
 DELETE /api/persons/:id/attributes/:aid   删除画像
+```
+
+### Excel 批量导入
+```
+GET  /api/import/template               下载模板（带必填标注/批注/下拉/填写说明）
+GET  /api/import/fields                 模板字段清单（前端渲染填写要求）
+POST /api/import/preview                上传预检，逐行校验，不写库
+POST /api/import/execute?mode=skip      确认导入（skip 跳过已存在 / update 覆盖）
 ```
 
 ### 资源（第一价值）
@@ -169,7 +179,7 @@ GET  /api/orgs/:id                 组织详情（含在任人员）
 GET  /api/graph?key_only=1         图谱 nodes + edges
 ```
 
-**共 30 个接口，冒烟测试 37 项全部通过。**
+**共 34 个接口，冒烟测试 46 项全部通过。**
 
 ---
 
@@ -183,6 +193,48 @@ GET  /api/graph?key_only=1         图谱 nodes + edges
 | `/resources` | 借资源 | 资源检索 + 圈子渗透度 + 常用标签 |
 | `/person/:id` | 联系人详情 | 任职、资源画像、触达路径、影响力、人际关系、接触时间线 |
 | `/graph` | 关系图 | Cytoscape 图谱，全屏独立页 |
+| `/manage` | 管理 | 人员列表、搜索筛选、新增/编辑/删除、批量删除、导入入口 |
+| `/import` | 导入名单 | 三步向导：下载模板 → 上传预检 → 确认入库 |
+
+### 人员管理（`/manage`）
+
+- 列表支持搜索、筛选（全部 / 重点 / 有资源 / 缺手机）、分页加载（每页 100，可「加载更多」）
+- 行内点「编辑」开抽屉改姓名、单位、职务、权力角色、手机、邮箱、重点标记、备注
+- 「批量」进入多选，可全选本页、批量删除；**本人节点受保护，删不掉**
+- 改单位才动任职记录，只改名不会在任职表里留下垃圾数据
+- 清空手机号是显式操作（PATCH 传空串），不会被当成「不修改」
+
+### Excel 导入向导（`/import`）
+
+三步走，**预检不写库**，确认后才真正落盘。
+
+**模板设计**
+
+| 设计 | 做法 |
+|---|---|
+| 必填标注 | 表头写成「姓名 *」，必填列浅红底、红色加粗，非必填浅灰底 |
+| 填写提示 | 每个表头的**批注**里写明规则和可选值，鼠标悬停即见 |
+| 防填错 | 权力角色 / 认识途径 / 涉敏等级 / 性别 / 是否重点 都做了**下拉数据验证**，填错直接拦 |
+| 格式保护 | 数据区预设文本格式，手机号不会被 Excel 转成 `1.38E+10` |
+| 好读 | 冻结表头与姓名列，列宽按内容预设，500 行预留 |
+| 说明页 | 独立的「填写说明」工作表：15 个字段的必填性、格式、说明、可选值、示例 |
+
+模板 15 列：姓名（必填）、单位、职务、部门、权力角色、手机号、微信号、邮箱、性别、认识途径、是否重点、涉敏等级、出生日期、资源标签、备注。
+
+**校验策略：宽进严出**
+
+- 自动修正但不拦：手机号带横杠/空格、全角逗号、`1975/3/12` 这类日期、Excel 科学计数法、姓名字间空格
+- 拦住不放过：姓名为空、枚举值不认识（报错里列出全部可选值）、超过 500 行
+- 提示但放过：号段不常见、邮箱格式可疑、资源标签超过 8 个
+
+**判重与写入**
+
+- 按「姓名 + 单位」判断是否已有；命中则可选 **跳过**（默认，保留现有资料）或 **更新**（只覆盖表格里填了的内容）
+- 文件内重复行自动识别，第二行起跳过，不会重复入库
+- 单位不存在时自动创建；资源标签按 `、` `,` `；` `/` 切分，每条落成一条 resource 画像，**已存在的标签不会重复追加**
+- 写入在事务里逐行执行，单行失败不影响其他行，最后给出「新增/更新/跳过/失败」四项计数和失败明细
+
+> 模板也可直接从仓库取：`docs/import-template.xlsx`（快照）。权威版本以 `GET /api/import/template` 为准，代码改了模板会自动跟着变。
 
 ---
 
@@ -393,9 +445,12 @@ console.log(db.prepare('SELECT name, phone FROM persons WHERE phone IS NOT NULL'
 关系       ✅ 本人节点 / 建立 / 枚举校验 / 重复拦截 / 列表
 组织       ✅ 简称搜索 / 详情(含在任人员)
 图谱       ✅ 节点+边 / 边标签中文 / 重点聚焦 / 统计
+Excel 导入 ✅ 模板下载(28KB) / 中文件名 / 字段清单 / 空表拒绝
+           ✅ 非 xlsx 拒绝 / 空表导入拒绝
+批量管理   ✅ 空 ids 拒绝 / 本人节点保护
 清理       ✅ 级联删除
 
-37/37 通过
+46/46 通过
 ```
 
 实测输出示例：
@@ -436,10 +491,15 @@ relation-api/
 │   │   └── seed.js         演示数据
 │   ├── lib/
 │   │   ├── crypto.js       AES-256-GCM + 密钥持久化
-│   │   ├── enums.js        枚举字典
-│   │   └── queries.js      核心查询（资源/路径/影响力/图谱）
-│   └── routes/             persons / resources / events / orgs / relations / graph
-└── test/smoke.js           37 项冒烟测试
+│   │   ├── enums.js        枚举字典 + 中文标签反解
+│   │   ├── queries.js      核心查询（资源/路径/影响力/图谱）
+│   │   ├── excel-template.js  模板生成（样式/批注/下拉/说明页）
+│   │   └── excel-parse.js     模板解析与逐行校验
+│   └── routes/             persons / resources / events / orgs / relations / graph / import
+└── test/smoke.js           46 项冒烟测试
+
+docs/
+└── import-template.xlsx    导入模板快照（权威版本以 API 为准）
 
 relation-web/
 ├── vite.config.js          构建 + PWA + 代理
@@ -452,4 +512,5 @@ relation-web/
     ├── styles/global.css   设计令牌
     ├── components/TabBar.vue
     └── views/              Today / Search / Resources / Graph / Record / Person
+                            Manage（人员管理）/ Import（导入向导）
 ```

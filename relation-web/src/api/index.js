@@ -44,6 +44,38 @@ const qs = (obj = {}) => {
   return s ? `?${s}` : '';
 };
 
+/** 上传二进制文件（xlsx），超时给得宽一些 */
+async function upload(path, file, { timeout = 60000 } = {}) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeout);
+
+  try {
+    const res = await fetch(BASE + path, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/octet-stream' },
+      body: file,
+      signal: controller.signal,
+    });
+
+    const text = await res.text();
+    let data = null;
+    try { data = text ? JSON.parse(text) : null; } catch { data = { raw: text }; }
+
+    if (!res.ok) {
+      const err = new Error(data?.error || `上传失败（${res.status}）`);
+      err.status = res.status;
+      err.data = data;
+      throw err;
+    }
+    return data;
+  } catch (e) {
+    if (e.name === 'AbortError') throw new Error('文件处理超时，请检查文件大小或网络');
+    throw e;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 export const api = {
   // ---------- 基础 ----------
   health: () => request('/health'),
@@ -89,6 +121,16 @@ export const api = {
 
   // ---------- 图谱 ----------
   graph: (params) => request('/graph' + qs(params)),
+
+  // ---------- 批量管理 ----------
+  batchDeletePersons: (ids) => request('/persons/batch-delete', { method: 'POST', body: { ids } }),
+
+  // ---------- Excel 导入 ----------
+  importFields: () => request('/import/fields'),
+  templateUrl: () => BASE + '/import/template',
+  importPreview: (file) => upload('/import/preview', file),
+  importExecute: (file, { mode = 'skip', skipInvalid = false } = {}) =>
+    upload('/import/execute' + qs({ mode, skip_invalid: skipInvalid ? 1 : undefined }), file),
 };
 
 export default api;

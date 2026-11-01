@@ -26,6 +26,18 @@ const routes = [
     meta: { title: '关系图', nav: true, fullscreen: true },
   },
   {
+    path: '/manage',
+    name: 'manage',
+    component: () => import('@/views/ManageView.vue'),
+    meta: { title: '管理', nav: true },
+  },
+  {
+    path: '/import',
+    name: 'import',
+    component: () => import('@/views/ImportView.vue'),
+    meta: { title: '导入名单' },
+  },
+  {
     path: '/record',
     name: 'record',
     component: () => import('@/views/RecordView.vue'),
