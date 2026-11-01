@@ -1,0 +1,23 @@
+{
+  "name": "relation-web",
+  "private": true,
+  "version": "1.0.0",
+  "description": "人脉关系网 · H5/PWA 前端",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview --port 4173"
+  },
+  "dependencies": {
+    "@vitejs/plugin-vue": "^6.0.10",
+    "cytoscape": "^3.34.4",
+    "pinia": "^4.1.0",
+    "vant": "^4.10.2",
+    "vite": "^5.4.21",
+    "vite-plugin-pwa": "^2.0.0",
+    "vue": "^3.5.44",
+    "vue-router": "^4.6.4",
+    "workbox-window": "^7.4.1"
+  }
+}

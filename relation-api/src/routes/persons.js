@@ -1,0 +1,208 @@
+/**
+ * 联系人路由
+ */
+import { Router } from 'express';
+import { all, get, run, transaction } from '../db/driver.js';
+import { encrypt, decrypt, maskPhone } from '../lib/crypto.js';
+import { isValidEnum, enumValues } from '../lib/enums.js';
+import { findPersons, getPerson, ensureOrg } from '../lib/queries.js';
+
+const router = Router();
+
+/** 校验枚举字段，非法则抛错 */
+function checkEnum(field, value, label) {
+  if (!isValidEnum(field, value)) {
+    const err = new Error(`${label || field} 取值非法：${value}；合法值：${enumValues(field).join(' / ')}`);
+    err.status = 400;
+    throw err;
+  }
+}
+
+/* ---------------- 查人 ---------------- */
+router.get('/', (req, res) => {
+  const { keyword, key_only, org_id, limit } = req.query;
+  const rows = findPersons({
+    keyword: keyword?.trim() || null,
+    keyOnly: key_only === '1' || key_only === 'true',
+    orgId: org_id ? Number(org_id) : null,
+    limit: Math.min(Number(limit) || 50, 200),
+  });
+  res.json({ total: rows.length, items: rows });
+});
+
+/* ---------------- 快速录入 ---------------- */
+router.post('/', (req, res) => {
+  const b = req.body || {};
+  if (!b.name || !String(b.name).trim()) {
+    return res.status(400).json({ error: '姓名(name) 必填' });
+  }
+
+  checkEnum('met_way', b.met_way, '认识途径');
+  checkEnum('power_level', b.power_level, '权力角色');
+  checkEnum('sensitivity', b.sensitivity, '涉敏等级');
+
+  const result = transaction(() => {
+    const p = run(
+      `INSERT INTO persons (name, title, gender, phone, wechat, email, birthday,
+                            met_way, is_key_contact, sensitivity, remark)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
+      [
+        String(b.name).trim(),
+        b.title || b.position || null,
+        b.gender || 'unknown',
+        encrypt(b.phone),
+        encrypt(b.wechat),
+        b.email || null,
+        b.birthday || null,
+        b.met_way || null,
+        b.is_key_contact ? 1 : 0,
+        b.sensitivity || 'normal',
+        b.remark || null,
+      ]
+    );
+    const personId = p.lastInsertRowid;
+
+    let orgId = null;
+    if (b.org_name) {
+      orgId = ensureOrg(String(b.org_name).trim());
+      run(
+        `INSERT INTO employments (person_id, org_id, position, department, power_level, is_current)
+         VALUES (?,?,?,?,?,1)`,
+        [personId, orgId, b.position || b.title || null, b.department || null, b.power_level || 'unknown']
+      );
+    }
+
+    // 可选：记录一条"认识"事件
+    if (b.met_date) {
+      run(
+        `INSERT INTO contact_events (person_id, org_id, event_date, scene, subject)
+         VALUES (?,?,?,?,?)`,
+        [personId, orgId, b.met_date, b.scene || null, b.remark || '首次认识']
+      );
+    }
+
+    return { id: personId, org_id: orgId };
+  });
+
+  res.status(201).json({ ok: true, ...result });
+});
+
+/* ---------------- 详情 ---------------- */
+router.get('/:id', (req, res) => {
+  const p = getPerson(Number(req.params.id));
+  if (!p) return res.status(404).json({ error: '联系人不存在' });
+  res.json(p);
+});
+
+/* ---------------- 补全 / 编辑 ---------------- */
+router.patch('/:id', (req, res) => {
+  const id = Number(req.params.id);
+  const exist = get('SELECT * FROM persons WHERE id = ?', [id]);
+  if (!exist) return res.status(404).json({ error: '联系人不存在' });
+
+  const b = req.body || {};
+  checkEnum('met_way', b.met_way, '认识途径');
+  checkEnum('sensitivity', b.sensitivity, '涉敏等级');
+
+  const fields = [];
+  const params = [];
+  const set = (col, val) => { fields.push(`${col} = ?`); params.push(val); };
+
+  if (b.name !== undefined) set('name', b.name);
+  if (b.title !== undefined) set('title', b.title);
+  if (b.gender !== undefined) set('gender', b.gender);
+  if (b.phone !== undefined) set('phone', encrypt(b.phone));
+  if (b.wechat !== undefined) set('wechat', encrypt(b.wechat));
+  if (b.email !== undefined) set('email', b.email);
+  if (b.birthday !== undefined) set('birthday', b.birthday);
+  if (b.met_way !== undefined) set('met_way', b.met_way);
+  if (b.is_key_contact !== undefined) set('is_key_contact', b.is_key_contact ? 1 : 0);
+  if (b.sensitivity !== undefined) set('sensitivity', b.sensitivity);
+  if (b.remark !== undefined) set('remark', b.remark);
+
+  // 任职变更
+  if (b.org_name) {
+    const orgId = ensureOrg(b.org_name);
+    run('UPDATE employments SET is_current = 0, end_date = date(\'now\',\'localtime\') WHERE person_id = ? AND is_current = 1', [id]);
+    run(
+      `INSERT INTO employments (person_id, org_id, position, department, power_level, is_current)
+       VALUES (?,?,?,?,?,1)`,
+      [id, orgId, b.position || b.title || null, b.department || null, b.power_level || 'unknown']
+    );
+  } else if (b.position !== undefined) {
+    run('UPDATE employments SET position = ? WHERE person_id = ? AND is_current = 1', [b.position, id]);
+  }
+
+  if (fields.length) {
+    fields.push("updated_at = datetime('now','localtime')");
+    params.push(id);
+    run(`UPDATE persons SET ${fields.join(', ')} WHERE id = ?`, params);
+  }
+
+  res.json({ ok: true, person: getPerson(id) });
+});
+
+/* ---------------- 删除 ---------------- */
+router.delete('/:id', (req, res) => {
+  const id = Number(req.params.id);
+  const exist = get('SELECT id, is_self FROM persons WHERE id = ?', [id]);
+  if (!exist) return res.status(404).json({ error: '联系人不存在' });
+  if (exist.is_self) return res.status(400).json({ error: '不能删除本人节点' });
+  run('DELETE FROM persons WHERE id = ?', [id]);
+  res.json({ ok: true });
+});
+
+/* ---------------- 一跳邻居（图谱按需加载） ---------------- */
+router.get('/:id/neighbors', (req, res) => {
+  const id = Number(req.params.id);
+  const person = get('SELECT id, name FROM persons WHERE id = ?', [id]);
+  if (!person) return res.status(404).json({ error: '联系人不存在' });
+
+  const neighbors = all(
+    `SELECT DISTINCT p.id, p.name, p.is_key_contact,
+            r.relation_type, r.strength, r.influence,
+            (SELECT o.name FROM employments e JOIN organizations o ON o.id = e.org_id
+             WHERE e.person_id = p.id AND e.is_current = 1 LIMIT 1) AS org_name
+     FROM relations r
+     JOIN persons p ON p.id = CASE WHEN r.from_person = ? THEN r.to_person ELSE r.from_person END
+     WHERE r.from_person = ? OR r.to_person = ?`,
+    [id, id, id]
+  );
+
+  const orgs = all(
+    `SELECT o.id, o.name, o.org_type, e.position, e.power_level
+     FROM employments e JOIN organizations o ON o.id = e.org_id
+     WHERE e.person_id = ? AND e.is_current = 1`,
+    [id]
+  );
+
+  res.json({ person, neighbors, orgs });
+});
+
+/* ---------------- 资源画像打标 ---------------- */
+router.post('/:id/attributes', (req, res) => {
+  const id = Number(req.params.id);
+  if (!get('SELECT id FROM persons WHERE id = ?', [id])) {
+    return res.status(404).json({ error: '联系人不存在' });
+  }
+  const b = req.body || {};
+  if (!b.attr_type || !b.attr_value) {
+    return res.status(400).json({ error: 'attr_type 与 attr_value 必填' });
+  }
+  checkEnum('attr_type', b.attr_type, '画像类型');
+
+  const info = run(
+    'INSERT INTO person_attributes (person_id, attr_type, attr_value, weight, note) VALUES (?,?,?,?,?)',
+    [id, b.attr_type, String(b.attr_value).trim(), Math.min(Math.max(Number(b.weight) || 3, 1), 5), b.note || null]
+  );
+  res.status(201).json({ ok: true, id: info.lastInsertRowid });
+});
+
+router.delete('/:id/attributes/:attrId', (req, res) => {
+  const info = run('DELETE FROM person_attributes WHERE id = ? AND person_id = ?',
+    [Number(req.params.attrId), Number(req.params.id)]);
+  if (!info.changes) return res.status(404).json({ error: '画像不存在' });
+  res.json({ ok: true });
+});
+
+export default router;
