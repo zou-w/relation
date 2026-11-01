@@ -28,6 +28,7 @@ export const ENUMS = {
       relative: '亲属',
       cooperation: '合作',
       friend: '朋友',
+      acquaintance: '熟人',
     },
   },
   power_level: {

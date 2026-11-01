@@ -39,7 +39,7 @@ const sceneLabel = {
 
 const relationLabel = {
   superior: '上下级', colleague: '同事', introducer: '引荐人', classmate: '同学',
-  relative: '亲属', cooperation: '合作', friend: '朋友',
+  relative: '亲属', cooperation: '合作', friend: '朋友', acquaintance: '熟人',
 };
 
 const groupedAttrs = computed(() => {
@@ -51,6 +51,7 @@ const groupedAttrs = computed(() => {
 });
 
 const currentEmp = computed(() => (person.value?.employments || []).find((e) => e.is_current));
+const crossRelations = computed(() => (person.value?.relations || []).filter((r) => r.is_cross_org));
 
 async function load() {
   loading.value = true;
@@ -199,6 +200,14 @@ onMounted(load);
               <van-icon name="add-o" />
               加标签
             </button>
+            <button
+              v-if="!person.is_self"
+              class="pa pa--cross"
+              @click="router.push(`/record-relation?with=${id}`)"
+            >
+              <van-icon name="exchange" />
+              记跨单位关系
+            </button>
             <a v-if="person.phone" class="pa" :href="`tel:${person.phone}`">
               <van-icon name="phone-o" />
               打电话
@@ -298,7 +307,10 @@ onMounted(load);
                 {{ p.hops === 1 ? '直达' : `${p.hops} 跳` }}
               </span>
               <div class="grow">
-                <div class="path-desc">{{ p.desc }}</div>
+                <div class="path-desc">
+                  {{ p.desc }}
+                  <span v-if="p.crossOrg" class="tag tag--cross" style="margin-left: 4px">跨单位</span>
+                </div>
                 <div class="muted" v-if="p.hops === 2">
                   我 ↔ {{ p.via.name }} {{ relationLabel[p.myRelation] || p.myRelation }} ·
                   {{ p.via.name }} → 目标 {{ relationLabel[p.theirRelation] || p.theirRelation }}
@@ -331,7 +343,10 @@ onMounted(load);
 
         <!-- 人际关系 -->
         <template v-if="person.relations?.length">
-          <div class="section-title">人际关系</div>
+          <div class="section-title">
+            人际关系
+            <span v-if="crossRelations.length" class="cross-hint">其中 {{ crossRelations.length }} 条跨单位</span>
+          </div>
           <div class="card list-card">
             <div
               v-for="r in person.relations"
@@ -344,6 +359,11 @@ onMounted(load);
                 <div class="item-title">{{ r.other_name }}</div>
                 <div class="muted ellipsis">{{ r.other_org || '未填单位' }}</div>
               </div>
+              <span
+                v-if="r.is_cross_org"
+                class="tag tag--cross"
+                title="不在同一单位，但两人认识"
+              >跨单位</span>
               <span class="tag tag--gray">{{ relationLabel[r.relation_type] || r.relation_type }}</span>
             </div>
           </div>
@@ -497,6 +517,9 @@ onMounted(load);
 
 .pa:active { transform: scale(.96); }
 .pa--on { background: var(--c-warning-light); border-color: var(--c-warning); color: var(--c-warning); font-weight: 600; }
+.pa--cross { background: #faf5ff; border-color: #e9d5ff; color: #7e22ce; }
+
+.cross-hint { font-size: 11.5px; color: #7e22ce; text-transform: none; letter-spacing: 0; font-weight: 500; }
 
 .profile-remark {
   margin-top: 12px;

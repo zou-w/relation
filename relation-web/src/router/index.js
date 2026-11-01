@@ -56,6 +56,12 @@ const routes = [
     meta: { title: '快速记录' },
   },
   {
+    path: '/record-relation',
+    name: 'record-relation',
+    component: () => import('@/views/RelRecordView.vue'),
+    meta: { title: '记录跨单位认识' },
+  },
+  {
     path: '/person/:id',
     name: 'person',
     component: () => import('@/views/PersonView.vue'),

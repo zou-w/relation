@@ -253,6 +253,26 @@ async function main() {
       `${data?.nodes?.length} 节点`);
   }
   {
+    const { status, data } = await req('GET', '/api/graph');
+    const crossEdges = data.edges.filter((e) => e.kind === 'relation' && e.crossOrg);
+    ok('跨单位关系识别', status === 200 && data.cross?.count >= 2 && crossEdges.length >= 2,
+      `${data?.cross?.count} 条跨单位认识（${(data.cross?.pairs || []).map((p) => p.label).join('、')}）`);
+    ok('跨单位关系两端单位不同', data.cross.pairs.every((p) => p.fromOrg && p.toOrg && p.fromOrg !== p.toOrg));
+    ok('同单位关系不误判', data.edges
+      .filter((e) => e.crossReason === 'same_org')
+      .every((e) => !e.crossOrg));
+    ok('图谱边标注是否跨单位', data.edges
+      .filter((e) => e.kind === 'relation')
+      .every((e) => typeof e.spansOrg === 'boolean'));
+  }
+  {
+    const { status, data } = await req('GET', '/api/graph?cross_org=1');
+    const persons = data.nodes.filter((n) => n.kind === 'person');
+    ok('只看跨单位关系（聚焦）', status === 200 && persons.length >= 3
+      && data.edges.filter((e) => e.kind === 'relation' && e.crossOrg).length >= 2,
+      `${persons.length} 人 · ${data?.cross?.count} 条`);
+  }
+  {
     const { status, data } = await req('GET', '/api/graph/stats');
     ok('统计概览', status === 200 && data.persons >= 5,
       `联系人 ${data?.persons} · 组织 ${data?.orgs} · 待办 ${data?.pending}`);

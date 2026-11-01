@@ -169,6 +169,18 @@ a { color: inherit; text-decoration: none; }
 .tag--warn { background: var(--c-warning-light); color: var(--c-warning); }
 .tag--danger { background: var(--c-danger-light); color: var(--c-danger); }
 .tag--success { background: var(--c-success-light); color: var(--c-success); }
+/* 跨单位认识：不同单位的两个人之间的私交，统一用紫红标识 */
+.tag--cross { background: #faf5ff; color: #7e22ce; border: 1px solid #e9d5ff; }
+
+/* 跨单位关系记录页：选人后不要让浏览器把页面滚走，保持"上方卡片"可见 */
+.cross-picker .cand,
+.cross-picker .pick-slot {
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-tap-highlight-color: transparent;
+}
+.cross-picker .cand:focus,
+.cross-picker .pick-slot:focus { outline: none; }
 
 /* 空状态 */
 .empty {

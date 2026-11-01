@@ -9,20 +9,26 @@ const router = Router();
 /** 图谱数据：nodes + edges */
 router.get('/', (req, res) => {
   const { key_only, limit, with_projects } = req.query;
+  const crossOnly = req.query.cross_org === '1' || req.query.cross_org === 'true';
   const data = graphData({
     keyOnly: key_only === '1' || key_only === 'true',
     limit: Math.min(Number(limit) || 200, 1000),
     // 默认带项目节点；显式传 0 可关掉
     withProjects: with_projects !== '0',
+    crossOnly,
   });
 
   // 补上中文标签，前端直接用
   const relationLabels = {
     superior: '上下级', colleague: '同事', introducer: '引荐人',
     classmate: '同学', relative: '亲属', cooperation: '合作', friend: '朋友',
+    acquaintance: '熟人',
   };
   for (const e of data.edges) {
     if (e.kind === 'relation') e.label = relationLabels[e.label] || e.label;
+  }
+  for (const p of data.cross?.pairs || []) {
+    p.label = relationLabels[p.relationType] || p.relationType;
   }
 
   res.json({ ...data, counts: { nodes: data.nodes.length, edges: data.edges.length } });

@@ -116,6 +116,17 @@ cd ../relation-api && npm start       # 会自动托管 ../relation-web/dist
 **4. 项目是关系的"事由"**
 只记"我认识他"信息量很薄；记成"他在这个项目里负责审批"，关系才有上下文、可被追问、可被复用。一个人在一个项目里只保留一条角色记录，兼任写进 `role_title`。
 
+**5. 跨单位认识是独立识别出来的**
+"不在同一单位但认识"最容易漏记，也最值钱——它正是打通两家单位的那条线。判定规则（`src/lib/cross-org.js`）：
+
+| 条件 | 说明 |
+|---|---|
+| 两人都有现任单位，且没有共同单位 | 用 `employments` 判断，一人挂靠多家单位时按"有交集即同单位"处理 |
+| 关系类型属于 `classmate / relative / friend / acquaintance` | 同事、上下级、合作默认视作工作关系，不计入 |
+| 任一方没填单位 | 标 `unknown`，不硬判 |
+
+识别结果同时喂给三处：图谱（紫红粗线 + 两端紫圈）、联系人详情（关系列表标"跨单位"）、搭线路径（"我→李伟→赵敏"这种跨单位的二跳路径优先排前面）。
+
 ---
 
 ## 五、API 一览
@@ -182,6 +193,26 @@ POST /api/orgs                     新建组织
 GET  /api/orgs/:id                 组织详情（含在任人员）
 
 GET  /api/graph?key_only=1         图谱 nodes + edges（默认带项目节点，with_projects=0 可关）
+GET  /api/graph?cross_org=1        只看跨单位认识（自动裁掉无关节点）
+```
+
+图谱返回里多了两处与"跨单位认识"相关的字段：
+
+```json
+{
+  "cross": {
+    "count": 2,
+    "pairs": [
+      { "id": 107, "from": "p86", "to": "p85", "fromName": "刘敏", "toName": "赵敏",
+        "fromOrg": "市建筑业协会", "toOrg": "市发展和改革委员会",
+        "relationType": "classmate", "label": "同学" }
+    ]
+  },
+  "edges": [
+    { "id": "r107", "source": "p86", "target": "p85", "kind": "relation",
+      "label": "同学", "crossOrg": true, "crossReason": "cross", "spansOrg": true }
+  ]
+}
 ```
 
 ### 项目
@@ -296,7 +327,20 @@ hideLabelsOnViewport: true,  // 拖拽时隐藏文字
 ### 另外两个细节
 
 - `<div class="cy-container">` 加了 `will-change: transform`，提示浏览器该层可独立合成
-- 图谱用 `manualChunks` 单独打包（443KB），**只有进入图谱页才加载**，不影响首页启动
+- 图谱用 `manualChunks` 单独打包（443KB+），**只有进入图谱页才加载**，不影响首页启动
+
+### 跨单位关系怎么在图上表达
+
+这是后加的一层，做法是"不新增节点、只强化边"：
+
+1. **样式上区分**：跨单位关系用 3px 紫红实线（`#9333ea`），普通关系是 1.4px 灰线；两端人员节点加紫色描边圈，远看就知道"这里连着两家单位"
+2. **布局上拉开**：跨单位边的 `idealEdgeLength` 设为 175（普通 110）、`edgeElasticity` 降到 0.16，自然形成"两个单位圈子被一条线连起来"的形态
+3. **可聚焦**：顶部「跨单位」按钮 → `?cross_org=1`，只留跨单位的人和他们所在的单位，一屏看完所有"跨界"通道
+4. **可强调/取消**：跨单位条数旁有「取消强调」，纯切 class，不重排、不闪
+5. **可阅读**：点顶部的「跨单位认识 N 条」弹出清单（谁—什么关系—哪家单位到哪家单位），点一条自动把两个人居中选中；点图上的边也会弹出这条关系的说明
+6. **布局可复现**：力导向布局前用固定种子替换 `Math.random`，同一批数据每次进来、每次「重排」都是同一张图，不会"点一下换一个样子"
+
+`fcose` 带非重叠约束，人物气泡不会互相压字，这是之前 `cose` 布局常见的毛病。
 
 ---
 
@@ -469,6 +513,8 @@ console.log(db.prepare('SELECT name, phone FROM persons WHERE phone IS NOT NULL'
 关系       ✅ 本人节点 / 建立 / 枚举校验 / 重复拦截 / 列表
 组织       ✅ 简称搜索 / 详情(含在任人员)
 图谱       ✅ 节点+边 / 边标签中文 / 重点聚焦 / 统计 / 项目节点
+           ✅ 跨单位识别 / 两端单位必不同 / 同单位不误判 / 边标注 spansOrg
+           ✅ 只看跨单位(cross_org=1) 自动聚焦
 项目       ✅ 列表 / 概览 / 名称必填 / 状态枚举校验 / 新建
            ✅ 加成员 / 重复加改为更新 / 角色枚举校验 / 无效联系人拒绝
            ✅ 详情含中文角色 / 候选池 / 批量加(含无效 id) / 改角色
@@ -479,7 +525,7 @@ Excel 导入 ✅ 模板下载(28KB) / 中文件名 / 字段清单 / 空表拒绝
 批量管理   ✅ 空 ids 拒绝 / 本人节点保护
 清理       ✅ 级联删除
 
-65/65 通过
+70/70 通过
 ```
 
 实测输出示例：
@@ -487,7 +533,7 @@ Excel 导入 ✅ 模板下载(28KB) / 中文件名 / 字段清单 / 空表拒绝
 二跳路径   我 → 张建国(市住房和城乡建设局) → 李伟
 资源检索   张建国 | 市住建局 副局长(决策) | 消防审批口人脉 权重5
 加密验证   库中 phone = enc1:4Rho+Y2RF...（密文），读取还原 13800001111
-图谱       8 节点 / 11 边（7 人际 + 4 任职）
+图谱       10 节点 / 19 边（8 人际含 2 条跨单位 + 4 任职 + …）
 ```
 
 ---
@@ -522,11 +568,12 @@ relation-api/
 │   │   ├── crypto.js       AES-256-GCM + 密钥持久化
 │   │   ├── enums.js        枚举字典 + 中文标签反解
 │   │   ├── queries.js      核心查询（资源/路径/影响力/图谱）
+│   │   ├── cross-org.js    跨单位认识识别（判定规则集中在这一个文件）
 │   │   ├── projects.js     项目查询（列表/详情/成员/局部图谱）
 │   │   ├── excel-template.js  模板生成（样式/批注/下拉/说明页）
 │   │   └── excel-parse.js     模板解析与逐行校验
 │   └── routes/             persons / resources / events / orgs / relations / graph / import / projects
-└── test/smoke.js           65 项冒烟测试
+└── test/smoke.js           70 项冒烟测试
 
 docs/
 └── import-template.xlsx    导入模板快照（权威版本以 API 为准）
@@ -540,7 +587,8 @@ relation-web/
     ├── api/index.js        统一请求封装
     ├── router/index.js
     ├── styles/global.css   设计令牌
-    ├── components/TabBar.vue
+    ├── components/TabBar.vue / OrgInput.vue / ProjectFormSheet.vue
     └── views/              Today / Search / Resources / Graph / Record / Person
-                            Manage（人员管理）/ Import（导入向导）
+                            Projects / Project / Manage（人员管理）/ Import（导入向导）
+                            RelRecord（记录跨单位认识）
 ```

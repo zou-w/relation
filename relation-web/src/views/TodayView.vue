@@ -184,6 +184,10 @@ onMounted(load);
             <van-icon name="add-o" class="quick-icon" />
             <span>记一个人</span>
           </div>
+          <div class="quick" @click="router.push('/record-relation')">
+            <van-icon name="exchange" class="quick-icon quick-icon--cross" />
+            <span>记关系</span>
+          </div>
           <div class="quick" @click="router.push('/search')">
             <van-icon name="search" class="quick-icon" />
             <span>查人</span>
@@ -244,8 +248,8 @@ onMounted(load);
 
 .quick-grid {
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
-  gap: 8px;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 6px;
   margin-bottom: 10px;
 }
 
@@ -266,4 +270,6 @@ onMounted(load);
 
 .quick:active { transform: scale(.97); }
 .quick-icon { font-size: 22px; color: var(--c-primary); }
+.quick-icon--cross { color: #9333ea; }
+.quick span { font-size: 11.5px; line-height: 1.25; text-align: center; }
 </style>

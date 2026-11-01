@@ -6,6 +6,7 @@ import { all, get, run } from '../db/driver.js';
 import { decrypt, maskPhone } from './crypto.js';
 import { enumLabel } from './enums.js';
 import { personProjects } from './projects.js';
+import { computeCrossOrg } from './cross-org.js';
 
 /** 把联系人行解密并补充当前任职信息 */
 function hydratePerson(row, opts = {}) {
@@ -106,6 +107,21 @@ export function getPerson(id) {
     'SELECT * FROM contact_events WHERE person_id = ? ORDER BY event_date DESC LIMIT 50',
     [id]
   );
+
+  // 关系标上"是否跨单位"，详情页一眼看出这条关系是不是跨单位认识
+  if (person.relations.length) {
+    const involved = [...new Set(person.relations.flatMap((r) => [r.from_person, r.to_person]))];
+    const emps = all(
+      `SELECT e.id, e.person_id, e.org_id, e.is_current FROM employments e
+        WHERE e.is_current = 1 AND e.person_id IN (${involved.map(() => '?').join(',')})`,
+      involved
+    );
+    const flags = computeCrossOrg(person.relations, emps, all('SELECT id, name FROM organizations'));
+    person.relations = person.relations.map((r) => {
+      const f = flags.get(r.id) || {};
+      return { ...r, is_cross_org: f.cross ? 1 : 0, cross_reason: f.reason || 'unknown' };
+    });
+  }
 
   // 参与的项目：项目是把关系落地的事由，详情页要能看到
   person.projects = personProjects(id).map((p) => ({
@@ -234,6 +250,7 @@ export function findPaths(targetId, maxHops = 2) {
       [self.id, self.id, self.id, targetId, targetId, targetId, self.id, targetId]
     );
 
+    const targetName = target.name;
     for (const r of rows) {
       paths.push({
         hops: 2,
@@ -243,13 +260,57 @@ export function findPaths(targetId, maxHops = 2) {
         strength: r.my_strength,
         influence: r.their_influence,
         score: (r.my_strength || 3) + (r.their_influence || 3),
-        desc: `我 → ${r.via_name}${r.via_org ? `(${r.via_org})` : ''} → ${target.name}`,
+        desc: `我 → ${r.via_name}${r.via_org ? `(${r.via_org})` : ''} → ${targetName}`,
       });
     }
     paths.sort((a, b) => (b.score || 99) - (a.score || 99));
   }
 
-  return { self, target, paths };
+  // 标注每条路径里"跨单位"的那一跳：这种中间人正是打通两个单位的关键
+  const targetOrg = get(
+    `SELECT o.id, o.name FROM employments e JOIN organizations o ON o.id = e.org_id
+     WHERE e.person_id = ? AND e.is_current = 1 LIMIT 1`,
+    [targetId]
+  ) || get(
+    `SELECT o.id, o.name FROM employments e JOIN organizations o ON o.id = e.org_id
+     WHERE e.person_id = ? ORDER BY e.is_current DESC, e.id ASC LIMIT 1`,
+    [targetId]
+  );
+  for (const p of paths) {
+    p.crossOrg = p.hops === 1
+      ? false
+      : !!(p.via.org && targetOrg?.name && p.via.org !== targetOrg.name);
+  }
+
+  // 跨单位的人优先排在前面：同样两跳，能跨过去的那条价值更高
+  paths.sort((a, b) => (Number(b.crossOrg) - Number(a.crossOrg)) || ((b.score || 0) - (a.score || 0)));
+
+  // 跨单位认识清单（两人都在图谱里即可）
+  const allRels = all('SELECT * FROM relations');
+  const flags = computeCrossOrg(
+    allRels,
+    all('SELECT id, person_id, org_id, is_current FROM employments WHERE is_current = 1'),
+    all('SELECT id, name FROM organizations'),
+    { names: new Map(all('SELECT id, name FROM persons').map((p) => [p.id, p.name])) }
+  );
+  const crossList = allRels
+    .filter((r) => flags.get(r.id)?.cross)
+    .map((r) => {
+      const f = flags.get(r.id);
+      return {
+        id: r.id,
+        relationType: r.relation_type,
+        label: enumLabel('relation_type', r.relation_type),
+        fromName: f.fromName,
+        toName: f.toName,
+        fromPerson: r.from_person,
+        toPerson: r.to_person,
+        fromOrg: f.fromOrg,
+        toOrg: f.toOrg,
+      };
+    });
+
+  return { self, target, targetOrg: targetOrg || null, paths, crossList };
 }
 
 /** 按组织找抓手：某单位我能通过谁搭上线 */
@@ -341,9 +402,9 @@ export function coldContacts(days = 30) {
  * 6. 关系网图谱
  * ============================================================ */
 
-export function graphData({ keyOnly = false, limit = 200, withProjects = true } = {}) {
+export function graphData({ keyOnly = false, limit = 200, withProjects = true, crossOnly = false } = {}) {
   const personWhere = keyOnly ? 'WHERE p.is_key_contact = 1 OR p.is_self = 1' : '';
-  const persons = all(
+  let persons = all(
     `SELECT p.id, p.name, p.is_key_contact, p.is_self, p.title,
             (SELECT o.id FROM employments e JOIN organizations o ON o.id = e.org_id
              WHERE e.person_id = p.id AND e.is_current = 1 LIMIT 1) AS org_id,
@@ -357,7 +418,41 @@ export function graphData({ keyOnly = false, limit = 200, withProjects = true } 
     [limit]
   );
 
-  const idSet = new Set(persons.map((p) => p.id));
+  let idSet = new Set(persons.map((p) => p.id));
+
+  // 只看跨单位关系：把参与的人与单位补全，再裁掉无关节点
+  let crossOnlyApplied = false;
+  if (crossOnly) {
+    crossOnlyApplied = true;
+    const allPersons = all(
+      `SELECT p.id, p.name, p.is_key_contact, p.is_self, p.title,
+              (SELECT o.id FROM employments e JOIN organizations o ON o.id = e.org_id
+               WHERE e.person_id = p.id AND e.is_current = 1 LIMIT 1) AS org_id,
+              (SELECT o.name FROM employments e JOIN organizations o ON o.id = e.org_id
+               WHERE e.person_id = p.id AND e.is_current = 1 LIMIT 1) AS org_name,
+              (SELECT e.power_level FROM employments e
+               WHERE e.person_id = p.id AND e.is_current = 1 LIMIT 1) AS power_level
+       FROM persons p ${personWhere}
+       ORDER BY p.is_self DESC, p.is_key_contact DESC
+       LIMIT ?`,
+      [limit]
+    );
+    const allRels = all('SELECT * FROM relations');
+    const allEmps = all(
+      `SELECT e.id, e.person_id, e.org_id, e.is_current FROM employments e WHERE e.is_current = 1`
+    );
+    const allOrgs = all('SELECT id, name FROM organizations');
+    const flags = computeCrossOrg(allRels, allEmps, allOrgs);
+    const keep = new Set();
+    for (const r of allRels) {
+      if (flags.get(r.id)?.cross) {
+        keep.add(r.from_person);
+        keep.add(r.to_person);
+      }
+    }
+    persons = allPersons.filter((p) => keep.has(p.id));
+    idSet = new Set(persons.map((p) => p.id));
+  }
   const orgIds = [...new Set(persons.map((p) => p.org_id).filter(Boolean))];
 
   const orgs = orgIds.length
@@ -367,11 +462,14 @@ export function graphData({ keyOnly = false, limit = 200, withProjects = true } 
       )
     : [];
 
+  const personIds = persons.map((p) => p.id);
+  const inList = personIds.length ? personIds.map(() => '?').join(',') : 'NULL';
+
   const rels = all(
     `SELECT r.* FROM relations r
-     WHERE r.from_person IN (${persons.map(() => '?').join(',') || 'NULL'})
-       AND r.to_person IN (${persons.map(() => '?').join(',') || 'NULL'})`,
-    [...persons.map((p) => p.id), ...persons.map((p) => p.id)]
+     WHERE r.from_person IN (${inList})
+       AND r.to_person IN (${inList})`,
+    [...personIds, ...personIds]
   ).filter((r) => idSet.has(r.from_person) && idSet.has(r.to_person));
 
   const emps = all(
@@ -380,14 +478,14 @@ export function graphData({ keyOnly = false, limit = 200, withProjects = true } 
      JOIN persons p ON p.id = e.person_id
      JOIN organizations o ON o.id = e.org_id
      WHERE e.is_current = 1
-       AND e.person_id IN (${persons.map(() => '?').join(',') || 'NULL'})`,
-    persons.map((p) => p.id)
+       AND e.person_id IN (${inList})`,
+    personIds
   );
 
   // 项目节点：只带成员落在当前节点集里的项目，避免出现悬空边
   const projectNodes = [];
   const projectEdges = [];
-  if (withProjects && persons.length) {
+  if (withProjects && !crossOnly && persons.length) {
     const pids = persons.map((p) => p.id);
     const rows = all(
       `SELECT pr.id AS project_id, pr.name, pr.status, pr.is_key,
@@ -441,16 +539,43 @@ export function graphData({ keyOnly = false, limit = 200, withProjects = true } 
     ...projectNodes,
   ];
 
+  // 跨单位认识：两个不同单位的人之间的非工作关系，标出来单独渲染
+  const flags = computeCrossOrg(rels, emps, orgs, {
+    names: new Map(persons.map((p) => [p.id, p.name])),
+  });
+  const nameOf = new Map(persons.map((p) => [p.id, p.name]));
+  const crossPairs = [];
+  let crossCount = 0;
+
   const edges = [
-    ...rels.map((r) => ({
-      id: `r${r.id}`,
-      source: `p${r.from_person}`,
-      target: `p${r.to_person}`,
-      kind: 'relation',
-      label: r.relation_type,
-      strength: r.strength,
-      influence: r.influence,
-    })),
+    ...rels.map((r) => {
+      const f = flags.get(r.id) || {};
+      if (f.cross) {
+        crossCount += 1;
+        crossPairs.push({
+          id: r.id,
+          from: `p${r.from_person}`,
+          to: `p${r.to_person}`,
+          fromName: nameOf.get(r.from_person) || '',
+          toName: nameOf.get(r.to_person) || '',
+          fromOrg: f.fromOrg,
+          toOrg: f.toOrg,
+          relationType: r.relation_type,
+          label: enumLabel('relation_type', r.relation_type),
+        });
+      }
+      return {
+        id: `r${r.id}`,
+        source: `p${r.from_person}`,
+        target: `p${r.to_person}`,
+        kind: 'relation',
+        label: r.relation_type,
+        strength: r.strength,
+        influence: r.influence,
+        crossOrg: !!f.cross,
+        crossReason: f.reason || 'unknown',
+      };
+    }),
     ...emps.map((e) => ({
       id: `eo${e.id}`,
       source: `p${e.person_id}`,
@@ -462,7 +587,21 @@ export function graphData({ keyOnly = false, limit = 200, withProjects = true } 
     ...projectEdges,
   ];
 
-  return { nodes, edges };
+  // 是否"跨越单位"：这条关系连接了两个人所在的不同单位
+  const nodeOrg = new Map(persons.map((p) => [p.id, p.org_id || null]));
+  for (const e of edges) {
+    if (e.kind !== 'relation') continue;
+    const a = nodeOrg.get(Number(String(e.source).replace('p', '')));
+    const b = nodeOrg.get(Number(String(e.target).replace('p', '')));
+    e.spansOrg = !!a && !!b && a !== b;
+  }
+
+  return {
+    nodes,
+    edges,
+    crossOnly: crossOnlyApplied,
+    cross: { count: crossCount, pairs: crossPairs },
+  };
 }
 
 /** 首页统计概览 */

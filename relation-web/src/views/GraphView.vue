@@ -8,11 +8,14 @@
  * 4. 点击节点按需加载一跳邻居，避免一次渲染全图
  * 5. 移动端加大触摸命中区
  */
-import { ref, onMounted, onBeforeUnmount, shallowRef, computed, nextTick } from 'vue';
+import { ref, onMounted, onBeforeUnmount, shallowRef, computed, nextTick, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import { showToast } from 'vant';
 import cytoscape from 'cytoscape';
+import fcose from 'cytoscape-fcose';
 import api from '@/api';
+
+cytoscape.use(fcose);
 
 const route = useRoute();
 const router = useRouter();
@@ -20,15 +23,24 @@ const router = useRouter();
 /** ?project=id 时只看单个项目的关系网 */
 const projectId = Number(route.query.project) || null;
 const projectName = ref('');
+/** ?cross_org=1 时只显示跨单位认识 */
+const crossParam = () => route.query.cross_org === '1';
 
 const container = ref(null);
 const cy = shallowRef(null);
 const loading = ref(true);
 const keyOnly = ref(false);
+/** 只看跨单位关系：把不同单位之间的"私人关系"拎出来单独看 */
+const crossOnly = ref(crossParam());
+/** 是否把跨单位关系标成高亮的强调线 */
+const emphasizeCross = ref(true);
 const stats = ref({ nodes: 0, edges: 0 });
+const crossCount = ref(0);
+const crossPairs = ref([]);
 const selected = ref(null);
 const showDetail = ref(false);
 const detail = ref(null);
+const showCrossList = ref(false);
 
 const theme = {
   person: { bg: '#ffffff', border: '#c7d2e5', text: '#1a1d23' },
@@ -38,6 +50,8 @@ const theme = {
   project: { bg: '#fff7ed', border: '#fb923c', text: '#9a3412' },
   edgeRel: '#94a3b8',
   edgeEmp: '#cbd5e1',
+  // 跨单位关系：紫红强调色，和普通关系线一眼区分
+  edgeCross: '#9333ea',
 };
 
 /** 构建 Cytoscape 元素 */
@@ -47,6 +61,7 @@ function buildElements(data) {
     const isKey = n.isKey;
     const isOrg = n.kind === 'org';
     const isProject = n.kind === 'project';
+    const isPerson = !isOrg && !isProject;
     const label = isProject && n.label.length > 15
       ? `${n.label.slice(0, 14)}…`
       : n.label;
@@ -64,6 +79,7 @@ function buildElements(data) {
         isProject ? 'project' : isOrg ? 'org' : 'person',
         isSelf ? 'self' : '',
         isKey && !isProject && !isOrg ? 'key' : '',
+        isPerson ? 'pnode' : '',
       ].filter(Boolean).join(' '),
     };
   });
@@ -76,8 +92,13 @@ function buildElements(data) {
       label: e.label || '',
       kind: e.kind,
       strength: e.strength,
+      crossOrg: e.crossOrg ? 1 : 0,
+      spansOrg: e.spansOrg ? 1 : 0,
     },
-    classes: e.kind === 'employment' ? 'edge-emp' : e.kind === 'project' ? 'edge-proj' : 'edge-rel',
+    classes: [
+      e.kind === 'employment' ? 'edge-emp' : e.kind === 'project' ? 'edge-proj' : 'edge-rel',
+      e.crossOrg ? 'edge-cross' : '',
+    ].filter(Boolean).join(' '),
   }));
 
   return [...nodes, ...edges];
@@ -114,13 +135,16 @@ function fitView(instance, { padTop = 96, padBottom = 92, maxScale = 2.0 } = {})
   const isMobile = w < 768;
   // 移动端底部有 tabbar + 横排图例，需要额外留白，否则节点会被压住
   const padB = isMobile ? Math.max(padBottom, 128) : Math.max(padBottom, 96);
-  const availW = Math.max(w - (isMobile ? 40 : 120), 120);
+  // 移动端两侧也要留够，避免单位节点贴边被裁掉
+  const padX = isMobile ? 28 : 60;
+  const availW = Math.max(w - padX * 2, 120);
   const availH = Math.max(h - padTop - padB, 120);
 
   const level = Math.max(Math.min(availW / bbW, availH / bbH, maxScale), 0.25);
   instance.zoom({ level });
 
-  // 模型坐标中心 → 渲染坐标中心（zoom 默认以 (0,0) 为基准，pan 后即为目标位置）
+  // 模型坐标中心 → 屏幕可视区中心（zoom 默认以 (0,0) 为基准，pan 后即为目标位置）
+  // 水平方向：居中即可；竖直方向：落在顶部工具条与底部图例之间
   const cx = (x0 + x1) / 2;
   const cy = (y0 + y1) / 2;
   instance.pan({
@@ -129,33 +153,61 @@ function fitView(instance, { padTop = 96, padBottom = 92, maxScale = 2.0 } = {})
   });
 }
 
+/** 用固定种子替换 Math.random，喂给力导向布局，保证布局结果可复现 */
+function seedRandom(seedStr) {
+  let seed = 2166136261;
+  for (let i = 0; i < seedStr.length; i += 1) {
+    seed ^= seedStr.charCodeAt(i);
+    seed = Math.imul(seed, 16777619);
+  }
+  seed >>>= 0;
+  Math.random = () => {
+    seed = (seed * 1664525 + 1013904223) >>> 0;
+    return seed / 4294967296;
+  };
+}
+
+/** 稳定布局种子：首次进图和点「重排」都得到同一张图 */
+const LAYOUT_SEED = 20261101;
+
 /** 布局并锁定 */
 function applyLayout(instance) {
-  // 力导向：只算一次。项目视角节点少，加大斥力让结构散得开
+  // 固定随机序列：同一批数据每次重排都得到同一张图，用户不会以为数据变了
+  seedRandom(`rel-${LAYOUT_SEED}`);
+  // fcose：带了非重叠约束的力导向，人物气泡不会互相压字
+  // 仍只算一次（animate: false），算完 autolock，拖拽只改视口
+  const fewNodes = instance.nodes().length <= 30;
   const opts = {
-    name: 'cose',
-    animate: false,           // 不做动画，一次性算完，避免掉帧
-    fit: false,               // 自己算视口，更可控
-    padding: 40,
-    nodeRepulsion: () => (projectId ? 160000 : 90000),
+    name: 'fcose',
+    quality: fewNodes ? 'proof' : 'default',
+    animate: false,
+    fit: false,
+    randomize: true,
+    padding: 30,
+    nodeSeparation: 110,
     idealEdgeLength: (edge) => {
       const k = edge.data('kind');
-      if (k === 'employment') return 60;
-      if (k === 'project') return projectId ? 150 : 130;
-      return 120;
+      const cross = edge.data('crossOrg') === 1;
+      if (k === 'employment') return 45;
+      if (k === 'project') return projectId ? 160 : 140;
+      // 跨单位的线拉长一点，自然形成"两个圈子被一条线连起来"的形态
+      return cross ? 175 : 110;
     },
-    edgeElasticity: () => 90,
-    nestingFactor: 1.2,
-    gravity: 0.45,            // 向心力小一点，避免节点全挤到一起
-    numIter: 1400,
-    initialTemp: 220,
-    coolingFactor: 0.95,
-    minTemp: 1.0,
-    randomize: true,
+    edgeElasticity: (edge) => (edge.data('crossOrg') === 1 ? 0.16 : 0.45),
+    nodeRepulsion: () => (projectId ? 14000 : 11000),
+    gravity: 0.28,
+    gravityRange: 3.2,
+    numIter: 2200,
+    samplingType: true,
+    packComponents: true,
   };
 
-  const layout = instance.layout(opts);
-  layout.run();
+  try {
+    instance.layout(opts).run();
+  } catch {
+    // 兜底：极少数环境 fcose 算不出来时退回环形布局，保证有图可看
+    instance.layout({ name: 'concentric', animate: false, fit: false, padding: 30 }).run();
+  }
 
   fitView(instance);
 
@@ -321,6 +373,58 @@ function initCy(data) {
           'text-rotation': 'autorotate',
         },
       },
+      // 跨单位认识：两个不同单位的人之间的私交，用紫红粗线 + 两端紫色圈强调
+      {
+        selector: 'edge.edge-cross',
+        style: {
+          width: 3,
+          'line-color': theme.edgeCross,
+          'target-arrow-color': theme.edgeCross,
+          'target-arrow-shape': 'triangle',
+          'arrow-scale': 0.9,
+          'curve-style': 'bezier',
+          'line-style': 'solid',
+          opacity: 1,
+          label: 'data(label)',
+          'font-size': 10,
+          'font-weight': 700,
+          color: '#7e22ce',
+          'text-background-color': '#faf5ff',
+          'text-background-opacity': 1,
+          'text-background-padding': 2,
+          'text-background-shape': 'roundrectangle',
+          'min-zoomed-font-size': 7,
+          'text-rotation': 'autorotate',
+          'z-index': 20,
+        },
+      },
+      // 跨单位关系两端的节点加紫色外圈，远看就知道"这里连着两家单位"
+      {
+        selector: 'node.pnode.cross-end',
+        style: {
+          'border-color': theme.edgeCross,
+          'border-width': 2.5,
+          'border-style': 'solid',
+        },
+      },
+      // 关掉"强调"时，跨单位线回到普通外观，只保留连接本身
+      {
+        selector: 'edge.edge-cross.muted',
+        style: {
+          width: 1.4,
+          'line-color': theme.edgeRel,
+          'target-arrow-color': theme.edgeRel,
+          'target-arrow-shape': 'none',
+          opacity: 0.75,
+          color: '#7c8798',
+          'font-weight': 400,
+          'text-background-color': '#f5f6f8',
+        },
+      },
+      {
+        selector: 'node.pnode.cross-end.muted',
+        style: { 'border-color': '#c7d2e5', 'border-width': 2 },
+      },
       {
         selector: 'node:selected',
         style: {
@@ -351,12 +455,26 @@ function initCy(data) {
   // 布局算一次后锁定
   applyLayout(instance);
 
+  // 跨单位关系的两端节点打标，配合强调开关
+  markCrossEnds(instance);
+  applyCrossEmphasis(instance);
+
   // 点击节点
   instance.on('tap', 'node', (evt) => {
     const node = evt.target;
     selected.value = node.data('raw');
     highlightNeighbors(instance, node);
     openDetail(node);
+  });
+
+  // 点击边：关系边显示这条关系说明（重点看跨单位的）
+  instance.on('tap', 'edge', (evt) => {
+    const edge = evt.target;
+    if (edge.data('kind') !== 'relation') return;
+    const a = edge.source().data('label') || '';
+    const b = edge.target().data('label') || '';
+    const t = edge.data('crossOrg') === 1 ? '跨单位认识' : '关系';
+    showToast(`${a} — ${b}：${t} · ${edge.data('label')}${edge.data('spansOrg') ? '（跨单位）' : ''}`);
   });
 
   // 点击空白取消
@@ -382,6 +500,29 @@ function initCy(data) {
 
   cy.value = instance;
   stats.value = { nodes: data.nodes.length, edges: data.edges.length };
+  crossCount.value = data.cross?.count || 0;
+  crossPairs.value = data.cross?.pairs || [];
+  if (data.crossOnly) crossOnly.value = true;
+}
+
+/** 把跨单位关系的两端节点标出来 */
+function markCrossEnds(instance) {
+  instance.nodes('.pnode').removeClass('cross-end');
+  instance.edges('.edge-cross').forEach((e) => {
+    e.source().addClass('cross-end');
+    e.target().addClass('cross-end');
+  });
+}
+
+/** 强调 / 取消强调跨单位关系（只切 class，不重算布局） */
+function applyCrossEmphasis(instance) {
+  if (emphasizeCross.value) {
+    instance.edges('.edge-cross').removeClass('muted');
+    instance.nodes('.cross-end').removeClass('muted');
+  } else {
+    instance.edges('.edge-cross').addClass('muted');
+    instance.nodes('.cross-end').addClass('muted');
+  }
 }
 
 /** 高亮邻居 */
@@ -390,6 +531,8 @@ function highlightNeighbors(instance, node) {
   const neighborhood = node.closedNeighborhood();
   instance.elements().not(neighborhood).addClass('dimmed');
   neighborhood.addClass('highlighted');
+  // 跨单位线不受淡化影响：顺着这条线就能看到"还能连到哪家单位"
+  instance.edges('.edge-cross').removeClass('dimmed').addClass('highlighted');
 }
 
 async function openDetail(node) {
@@ -415,6 +558,10 @@ async function openDetail(node) {
       personId: pid,
       neighbors: r.neighbors || [],
       orgs: r.orgs || [],
+      // 这个人的跨单位认识：在抽屉里直接点，跳到对方
+      cross: crossPairs.value.filter(
+        (p) => p.from === `p${pid}` || p.to === `p${pid}`
+      ),
       loaded: true,
     };
   } catch {
@@ -429,9 +576,13 @@ async function load() {
     if (projectId) {
       const g = await api.projectGraph(projectId);
       projectName.value = g.project?.name || '';
-      data = { nodes: g.nodes, edges: g.edges };
+      data = { nodes: g.nodes, edges: g.edges, cross: g.cross };
     } else {
-      data = await api.graph({ key_only: keyOnly.value ? 1 : undefined, limit: 300 });
+      data = await api.graph({
+        key_only: keyOnly.value ? 1 : undefined,
+        cross_org: crossOnly.value ? 1 : undefined,
+        limit: 300,
+      });
     }
     await nextTick();
     // 容器需要已渲染
@@ -441,6 +592,45 @@ async function load() {
   } finally {
     loading.value = false;
   }
+}
+
+/** 切到跨单位视角：布局会重算（节点集变了），所以走重新加载 */
+function toggleCrossOnly() {
+  crossOnly.value = !crossOnly.value;
+  if (crossOnly.value) keyOnly.value = false;
+  // 同步到地址栏，方便回退 / 分享当前视角（用 history 直接写，避免路由重挂载导致重复初始化）
+  const url = crossOnly.value ? '/graph?cross_org=1' : '/graph';
+  window.history.replaceState(window.history.state, '', url);
+  load();
+}
+
+/** 强调开关：纯样式切换，不重排，瞬间完成 */
+function toggleEmphasis() {
+  emphasizeCross.value = !emphasizeCross.value;
+  if (cy.value) applyCrossEmphasis(cy.value);
+}
+
+/** 点开跨单位关系清单里的某条，把两端节点选中并居中 */
+function focusPair(p) {
+  const instance = cy.value;
+  if (!instance) return;
+  const a = instance.getElementById(p.from);
+  const b = instance.getElementById(p.to);
+  if (a.empty() || b.empty()) {
+    showToast('这两个人不在当前视图里');
+    return;
+  }
+  showCrossList.value = false;
+  instance.elements().unselect();
+  a.select();
+  highlightNeighbors(instance, a);
+  const box = a.union(b).renderedBoundingBox({ includeLabels: true });
+  const z = Math.min(Math.max(instance.zoom(), 0.9), 1.4);
+  instance.zoom({ level: z });
+  instance.pan({
+    x: instance.width() / 2 - ((box.x1 + box.x2) / 2),
+    y: instance.height() / 2 - ((box.y1 + box.y2) / 2),
+  });
 }
 
 /** 重新布局 */
@@ -472,6 +662,10 @@ function fit() {
 
 function toggleKey() {
   keyOnly.value = !keyOnly.value;
+  if (keyOnly.value && crossOnly.value) {
+    crossOnly.value = false;
+    window.history.replaceState(window.history.state, '', '/graph');
+  }
   load();
 }
 
@@ -480,6 +674,25 @@ function goPerson() {
     showDetail.value = false;
     router.push(`/person/${detail.value.personId}`);
   }
+}
+
+/** 抽屉里点跨单位认识的人：选中并居中该节点，不用跳页也能顺着关系走 */
+function jumpPerson(nodeId) {
+  const instance = cy.value;
+  if (!instance) return;
+  const node = instance.getElementById(nodeId);
+  if (node.empty()) return;
+  selected.value = node.data('raw');
+  highlightNeighbors(instance, node);
+  openDetail(node);
+  // 选中节点居中：选中的对象正好在视口中心，抽屉不会挡住
+  instance.animate({ center: { eles: node }, zoom: Math.max(instance.zoom(), 0.85) }, { duration: 260 });
+}
+
+/** 去补录一条跨单位认识 */
+function goRecordRelation() {
+  showCrossList.value = false;
+  router.push('/record-relation');
 }
 
 /** 窗口尺寸变化时重新 fit */
@@ -521,6 +734,10 @@ onBeforeUnmount(() => {
             <van-icon name="star-o" />
             只看重点
           </button>
+          <button v-if="!projectId" class="pill" :class="{ 'pill--cross': crossOnly }" @click="toggleCrossOnly">
+            <van-icon name="exchange" />
+            跨单位
+          </button>
           <button class="pill" @click="relayout">
             <van-icon name="replay" />
             重排
@@ -529,6 +746,18 @@ onBeforeUnmount(() => {
       </div>
       <div class="meta" v-if="!loading">
         {{ stats.nodes }} 节点 · {{ stats.edges }} 条连接
+        <button
+          v-if="crossCount"
+          class="meta-cross"
+          :class="{ 'meta-cross--off': !emphasizeCross }"
+          @click="showCrossList = true"
+        >
+          <i class="mc-dot"></i>
+          跨单位认识 {{ crossCount }} 条
+        </button>
+        <button v-if="crossCount" class="meta-toggle" @click="toggleEmphasis">
+          {{ emphasizeCross ? '取消强调' : '强调显示' }}
+        </button>
       </div>
     </div>
 
@@ -540,9 +769,17 @@ onBeforeUnmount(() => {
     <!-- 空态 -->
     <div v-else-if="!stats.nodes" class="cy-empty">
       <van-icon name="cluster-o" class="ce-icon" />
-      <div class="ce-title">{{ projectId ? '这个项目还没有标记参与人' : '还没有关系网' }}</div>
+      <div class="ce-title">
+        {{ projectId ? '这个项目还没有标记参与人' : crossOnly ? '还没有跨单位认识的关系' : '还没有关系网' }}
+      </div>
       <div class="ce-hint">
-        {{ projectId ? '回项目详情点「加人」，把参与人标进来' : '先录入几位联系人，关系图会自动生成' }}
+        {{
+          projectId
+            ? '回项目详情点「加人」，把参与人标进来'
+            : crossOnly
+              ? '在联系人详情里给不同单位的两个人加上「同学 / 亲属 / 朋友 / 熟人」关系'
+              : '先录入几位联系人，关系图会自动生成'
+        }}
       </div>
     </div>
 
@@ -560,7 +797,47 @@ onBeforeUnmount(() => {
       <span class="lg"><i class="dot dot--person"></i>联系人</span>
       <span class="lg"><i class="dot dot--org"></i>单位</span>
       <span class="lg"><i class="dot dot--proj"></i>项目</span>
+      <span class="lg"><i class="line line--cross"></i>跨单位认识</span>
     </div>
+
+    <!-- 跨单位认识清单 -->
+    <transition name="sheet">
+      <div v-if="showCrossList" class="cross-sheet">
+        <div class="cs-head">
+          <div>
+            <div class="cs-title">跨单位认识</div>
+            <div class="cs-sub">不同单位的两个人之间的私交，往往是打通两家单位的钥匙</div>
+          </div>
+          <van-icon name="cross" size="18" class="ns-close" @click="showCrossList = false" />
+        </div>
+        <div class="cs-list">
+          <div
+            v-for="p in crossPairs"
+            :key="p.id"
+            class="cs-item"
+            @click="focusPair(p)"
+          >
+            <div class="cs-line">
+              <span class="cs-name">{{ p.fromName || '?' }}</span>
+              <span class="cs-rel">{{ p.label }}</span>
+              <span class="cs-name">{{ p.toName || '?' }}</span>
+            </div>
+            <div class="cs-orgs">
+              <span class="ellipsis">{{ p.fromOrg || '未填单位' }}</span>
+              <van-icon name="arrow" class="cs-arrow" />
+              <span class="ellipsis">{{ p.toOrg || '未填单位' }}</span>
+            </div>
+          </div>
+          <div v-if="!crossPairs.length" class="cs-empty">
+            还没有跨单位认识。不同单位的两个人，往往私下就认识 —— 补记一条，图谱就通了。
+          </div>
+        </div>
+        <button class="cs-add" @click="goRecordRelation">
+          <van-icon name="add-o" />
+          记一条跨单位认识
+        </button>
+      </div>
+    </transition>
 
     <!-- 节点详情抽屉 -->
     <transition name="sheet">
@@ -580,6 +857,21 @@ onBeforeUnmount(() => {
         </div>
 
         <div v-if="detail.loaded" class="ns-body">
+          <div v-if="detail.cross?.length" class="ns-sec">
+            <div class="ns-label">跨单位认识 · {{ detail.cross.length }}</div>
+            <div class="ns-neighbors">
+              <span
+                v-for="p in detail.cross"
+                :key="p.id"
+                class="ns-cross"
+                @click="jumpPerson(p.from === `p${detail.personId}` ? p.to : p.from)"
+              >
+                {{ p.from === `p${detail.personId}` ? p.toName : p.fromName }}
+                <i class="ns-cross-rel">{{ p.label }}</i>
+              </span>
+            </div>
+            <div class="ns-tip">不在同一单位，但两人认识 —— 往往能替你把线搭过去</div>
+          </div>
           <div v-if="detail.orgs?.length" class="ns-sec">
             <div class="ns-label">任职单位</div>
             <div class="ns-chips">
@@ -691,6 +983,65 @@ onBeforeUnmount(() => {
   font-weight: 600;
 }
 
+.pill--cross {
+  background: #faf5ff;
+  border-color: #a855f7;
+  color: #7e22ce;
+  font-weight: 600;
+}
+
+/* 统计行 + 跨单位提示 */
+.meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  pointer-events: auto;
+  position: relative;
+}
+
+.meta-cross {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  border: 0;
+  border-radius: 999px;
+  padding: 2px 9px;
+  background: #faf5ff;
+  color: #7e22ce;
+  font-family: inherit;
+  font-size: 11.5px;
+  font-weight: 600;
+  cursor: pointer;
+  font-variant-numeric: tabular-nums;
+}
+
+.meta-cross--off {
+  background: #f1f2f4;
+  color: var(--c-text-2);
+}
+
+.meta-cross--off .mc-dot { background: #b6bcc7; }
+
+.mc-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #9333ea;
+}
+
+.meta-toggle {
+  border: 0;
+  background: none;
+  color: var(--c-text-3);
+  font-family: inherit;
+  font-size: 11.5px;
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  padding: 0;
+}
+
 .cy-empty {
   position: absolute;
   inset: 0;
@@ -771,6 +1122,94 @@ onBeforeUnmount(() => {
 .dot--person { background: #fff; border: 1.5px solid #c7d2e5; }
 .dot--org { background: #eef4ff; border: 1.5px dashed #bfdbfe; border-radius: 3px; }
 .dot--proj { background: #fff7ed; border: 1.5px solid #fb923c; border-radius: 3px; }
+.dot--cross { background: #9333ea; }
+
+/* 跨单位认识清单 */
+.cross-sheet {
+  position: absolute;
+  left: 12px;
+  right: 12px;
+  bottom: calc(70px + var(--safe-bottom));
+  max-width: 560px;
+  margin: 0 auto;
+  z-index: 22;
+  background: rgba(255, 255, 255, .985);
+  backdrop-filter: blur(16px);
+  border-radius: 16px;
+  border: 1px solid var(--c-border);
+  box-shadow: var(--shadow-lg);
+  padding: 14px 14px 8px;
+  max-height: 62vh;
+  display: flex;
+  flex-direction: column;
+}
+
+.cs-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; }
+.cs-title { font-size: 15px; font-weight: 700; color: #7e22ce; }
+.cs-sub { font-size: 11.5px; color: var(--c-text-3); margin-top: 2px; line-height: 1.5; }
+
+.cs-list { overflow-y: auto; margin-top: 8px; -webkit-overflow-scrolling: touch; }
+
+.cs-item {
+  padding: 10px 0;
+  border-bottom: 1px solid var(--c-border);
+  cursor: pointer;
+}
+
+.cs-item:last-child { border-bottom: 0; }
+.cs-item:active { opacity: .6; }
+
+.cs-line { display: flex; align-items: center; gap: 7px; font-size: 14px; }
+.cs-name { font-weight: 600; }
+
+.cs-rel {
+  font-size: 11px;
+  font-weight: 700;
+  color: #7e22ce;
+  background: #faf5ff;
+  border-radius: 5px;
+  padding: 1px 7px;
+}
+
+.cs-orgs {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  margin-top: 4px;
+  font-size: 11.5px;
+  color: var(--c-text-3);
+  min-width: 0;
+}
+
+.cs-orgs .ellipsis { max-width: 45%; }
+.cs-arrow { font-size: 10px; flex-shrink: 0; color: #a855f7; }
+.cs-empty { text-align: center; color: var(--c-text-3); font-size: 13px; padding: 18px 8px; line-height: 1.6; }
+
+.cs-add {
+  margin-top: 8px;
+  flex-shrink: 0;
+  border: 1px dashed #d8b4fe;
+  background: #faf5ff;
+  color: #7e22ce;
+  border-radius: 10px;
+  padding: 9px;
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+}
+
+.line {
+  display: inline-block;
+  width: 14px;
+  height: 0;
+  border-top: 2.5px solid #9333ea;
+  border-radius: 2px;
+}
 
 /* 移动端图例横排，避免压住左下角节点 */
 @media (max-width: 767px) {
@@ -836,6 +1275,36 @@ onBeforeUnmount(() => {
 .ns-label { font-size: 11.5px; color: var(--c-text-3); margin-bottom: 5px; }
 .ns-chips { display: flex; flex-wrap: wrap; gap: 5px; }
 .ns-neighbors { display: flex; flex-wrap: wrap; gap: 5px; }
+
+.ns-cross {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: #faf5ff;
+  color: #7e22ce;
+  border: 1px solid #e9d5ff;
+  border-radius: 8px;
+  padding: 4px 9px;
+  font-size: 12.5px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.ns-cross:active { opacity: .6; }
+
+.ns-cross-rel {
+  font-style: normal;
+  font-size: 10.5px;
+  font-weight: 500;
+  color: #a855f7;
+}
+
+.ns-tip {
+  font-size: 11px;
+  color: var(--c-text-3);
+  margin-top: 6px;
+  line-height: 1.5;
+}
 .ns-loading { display: flex; justify-content: center; padding: 12px 0 4px; }
 
 .sheet-enter-active, .sheet-leave-active { transition: all .22s cubic-bezier(.4, 0, .2, 1); }

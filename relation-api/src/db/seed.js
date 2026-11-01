@@ -149,8 +149,11 @@ transaction(() => {
   rel(personId.me, personId.zhao, 'cooperation', 3, 4, '项目对接结识');
   rel(personId.me, personId.liu, 'friend', 4, 3, '协会活动熟识');
   rel(personId.liu, personId.zhang, 'colleague', 3, 3, '协会事务往来');
-  rel(personId.liu, personId.zhao, 'colleague', 2, 2, '跨部门活动认识');
   rel(personId.me, personId.li, 'cooperation', 2, 3, '经张建国引荐，尚浅');
+
+  // 跨单位认识：不在同一单位，但私下有关系 —— 这类"弱连接"往往最能打通两个单位
+  rel(personId.liu, personId.zhao, 'classmate', 3, 3, '市委党校中青班同班同学，不同单位');
+  rel(personId.li, personId.zhao, 'acquaintance', 2, 4, '早年区里共事过，现在分属两家单位');
 
   // ---------- 接触事件 ----------
   const ev = (pid, oid, date, scene, subject, nextAction, nextDate, done = 0) =>
