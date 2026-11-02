@@ -110,6 +110,7 @@ CREATE TABLE IF NOT EXISTS relations (
   influence     INTEGER NOT NULL DEFAULT 3,         -- 他对别人的话语权 1-5
   introducer_id INTEGER REFERENCES persons(id) ON DELETE SET NULL,
   note          TEXT,
+  owner_id      TEXT    NOT NULL DEFAULT 'me',   -- 谁录的这条关系
   created_at    TEXT    NOT NULL DEFAULT (datetime('now','localtime'))
 );
 
@@ -198,3 +199,56 @@ CREATE INDEX IF NOT EXISTS idx_pm_person  ON project_members(person_id);
 -- 一个人在一个项目里只保留一条角色记录，兼任写进 role_title
 CREATE UNIQUE INDEX IF NOT EXISTS uk_pm_person
   ON project_members(project_id, person_id);
+
+-- ============================================================
+-- 10. users  账号（登录、角色）
+-- ============================================================
+CREATE TABLE IF NOT EXISTS users (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  username      TEXT    NOT NULL UNIQUE,
+  display_name  TEXT,
+  password_hash TEXT    NOT NULL,             -- scrypt$N$salt$hash
+  role          TEXT    NOT NULL DEFAULT 'user',   -- super_admin|user
+  status        TEXT    NOT NULL DEFAULT 'active', -- active|disabled
+  phone         TEXT,
+  remark        TEXT,
+  created_by    TEXT,
+  created_at    TEXT    NOT NULL DEFAULT (datetime('now','localtime')),
+  last_login_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_users_role ON users(role);
+
+-- ============================================================
+-- 11. sessions  登录会话（Bearer Token）
+-- ============================================================
+CREATE TABLE IF NOT EXISTS sessions (
+  token      TEXT    PRIMARY KEY,
+  user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  expires_at TEXT    NOT NULL,
+  created_at TEXT    NOT NULL DEFAULT (datetime('now','localtime')),
+  user_agent TEXT,
+  ip         TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
+
+-- ============================================================
+-- 12. data_shares  数据共享（超管把某人的数据授权给另一个账号看）
+-- person_id 为空 = 共享该 owner 的全部数据；否则只共享指定联系人
+-- 共享是只读的：被共享人看到、能拿来搭关系，但不能改别人的原始记录
+-- ============================================================
+CREATE TABLE IF NOT EXISTS data_shares (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  owner_id   TEXT    NOT NULL,                 -- 数据所有者（users.id 字符串）
+  grantee_id TEXT    NOT NULL,                 -- 被共享人
+  person_id  INTEGER REFERENCES persons(id) ON DELETE CASCADE,
+  granted_by TEXT,
+  note       TEXT,
+  created_at TEXT    NOT NULL DEFAULT (datetime('now','localtime'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_share_grantee ON data_shares(grantee_id);
+CREATE INDEX IF NOT EXISTS idx_share_owner   ON data_shares(owner_id);
+CREATE UNIQUE INDEX IF NOT EXISTS uk_share
+  ON data_shares(owner_id, grantee_id, COALESCE(person_id, 0));

@@ -9,6 +9,7 @@ import express from 'express';
 import { run, get, transaction } from '../db/driver.js';
 import { encrypt } from '../lib/crypto.js';
 import { ensureOrg } from '../lib/queries.js';
+import { canWritePerson } from '../lib/scope.js';
 import { buildTemplate, templateMeta } from '../lib/excel-template.js';
 import { parseWorkbook } from '../lib/excel-parse.js';
 
@@ -65,7 +66,7 @@ router.get('/fields', (req, res) => {
 router.post('/preview', rawBody, async (req, res, next) => {
   try {
     assertXlsx(req);
-    const result = await parseWorkbook(req.body, { checkDuplicate: true });
+    const result = await parseWorkbook(req.body, { checkDuplicate: true, ctx: req.ctx });
     res.json({
       ok: true,
       summary: result.summary,
@@ -100,7 +101,7 @@ router.post('/execute', rawBody, async (req, res, next) => {
   try {
     assertXlsx(req);
     const mode = req.query.mode === 'update' ? 'update' : 'skip';
-    const { rows, summary } = await parseWorkbook(req.body, { checkDuplicate: true });
+    const { rows, summary } = await parseWorkbook(req.body, { checkDuplicate: true, ctx: req.ctx });
 
     const errors = rows.filter((r) => r.status === 'error');
     if (errors.length && req.query.skip_invalid !== '1') {
@@ -130,8 +131,8 @@ router.post('/execute', rawBody, async (req, res, next) => {
       try {
         const out = transaction(() => (
           r.action === 'update'
-            ? updatePerson(r.matchedId, r.data)
-            : createPerson(r.data)
+            ? updatePerson(r.matchedId, r.data, req.ctx)
+            : createPerson(r.data, req.ctx)
         ));
         results.push({
           rowNumber: r.rowNumber,
@@ -170,11 +171,11 @@ router.post('/execute', rawBody, async (req, res, next) => {
 /* ============================================================
  * 写入实现
  * ========================================================== */
-function createPerson(d) {
+function createPerson(d, ctx) {
   const info = run(
     `INSERT INTO persons (name, title, gender, phone, wechat, email, birthday,
-                          met_way, is_key_contact, sensitivity, remark)
-     VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
+                          met_way, is_key_contact, sensitivity, remark, owner_id)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
     [
       d.name,
       d.position || null,
@@ -187,12 +188,13 @@ function createPerson(d) {
       d.is_key_contact ? 1 : 0,
       d.sensitivity || 'normal',
       d.remark || null,
+      ctx.userId,
     ]
   );
   const id = info.lastInsertRowid;
 
   if (d.org_name) {
-    const orgId = ensureOrg(d.org_name);
+    const orgId = ensureOrg(d.org_name, ctx);
     run(
       `INSERT INTO employments (person_id, org_id, position, department, power_level, is_current)
        VALUES (?,?,?,?,?,1)`,
@@ -204,7 +206,10 @@ function createPerson(d) {
   return id;
 }
 
-function updatePerson(id, d) {
+function updatePerson(id, d, ctx) {
+  if (!canWritePerson(ctx, id)) {
+    throw new Error('这条记录是别人共享给你的数据，导入时不能覆盖');
+  }
   const fields = [];
   const params = [];
   const set = (col, val) => { fields.push(`${col} = ?`); params.push(val); };
@@ -235,7 +240,7 @@ function updatePerson(id, d) {
       [id]
     );
     if (!cur || cur.name !== d.org_name) {
-      const orgId = ensureOrg(d.org_name);
+      const orgId = ensureOrg(d.org_name, ctx);
       run(`UPDATE employments SET is_current = 0, end_date = date('now','localtime')
             WHERE person_id = ? AND is_current = 1`, [id]);
       run(

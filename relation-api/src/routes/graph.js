@@ -16,7 +16,7 @@ router.get('/', (req, res) => {
     // 默认带项目节点；显式传 0 可关掉
     withProjects: with_projects !== '0',
     crossOnly,
-  });
+  }, req.ctx);
 
   // 补上中文标签，前端直接用
   const relationLabels = {
@@ -36,7 +36,7 @@ router.get('/', (req, res) => {
 
 /** 首页统计概览 */
 router.get('/stats', (req, res) => {
-  res.json(stats());
+  res.json(stats(req.ctx));
 });
 
 export default router;

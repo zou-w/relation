@@ -21,7 +21,9 @@ const route = useRoute();
 const router = useRouter();
 
 /** ?project=id 时只看单个项目的关系网 */
-const projectId = Number(route.query.project) || null;
+const projectId = ref(Number(route.query.project) || null);
+/** 是否把项目节点也画进关系图（项目多的时候可以关掉，只看人与单位） */
+const showProjects = ref(true);
 const projectName = ref('');
 /** ?cross_org=1 时只显示跨单位认识 */
 const crossParam = () => route.query.cross_org === '1';
@@ -140,7 +142,8 @@ function fitView(instance, { padTop = 96, padBottom = 92, maxScale = 2.0 } = {})
   const availW = Math.max(w - padX * 2, 120);
   const availH = Math.max(h - padTop - padB, 120);
 
-  const level = Math.max(Math.min(availW / bbW, availH / bbH, maxScale), 0.25);
+  // 下限 0.42：宁可让边缘节点稍微出屏（可拖动），也不要把整张图缩成看不清
+  const level = Math.max(Math.min(availW / bbW, availH / bbH, maxScale), 0.42);
   instance.zoom({ level });
 
   // 模型坐标中心 → 屏幕可视区中心（zoom 默认以 (0,0) 为基准，pan 后即为目标位置）
@@ -184,19 +187,20 @@ function applyLayout(instance) {
     fit: false,
     randomize: true,
     padding: 30,
-    nodeSeparation: 110,
+    nodeSeparation: 66,
     idealEdgeLength: (edge) => {
       const k = edge.data('kind');
       const cross = edge.data('crossOrg') === 1;
-      if (k === 'employment') return 45;
-      if (k === 'project') return projectId ? 160 : 140;
+      if (k === 'employment') return 34;
+      if (k === 'project') return projectId.value ? 95 : 85;
       // 跨单位的线拉长一点，自然形成"两个圈子被一条线连起来"的形态
-      return cross ? 175 : 110;
+      return cross ? 120 : 74;
     },
-    edgeElasticity: (edge) => (edge.data('crossOrg') === 1 ? 0.16 : 0.45),
-    nodeRepulsion: () => (projectId ? 14000 : 11000),
-    gravity: 0.28,
-    gravityRange: 3.2,
+    edgeElasticity: (edge) => (edge.data('crossOrg') === 1 ? 0.2 : 0.5),
+    // 斥力别开太大：图铺得过开，一屏装不下就只能缩到看不清字
+    nodeRepulsion: () => (projectId.value ? 7000 : 5200),
+    gravity: 0.42,
+    gravityRange: 2.8,
     numIter: 2200,
     samplingType: true,
     packComponents: true,
@@ -573,14 +577,15 @@ async function load() {
   loading.value = true;
   try {
     let data;
-    if (projectId) {
-      const g = await api.projectGraph(projectId);
+    if (projectId.value) {
+      const g = await api.projectGraph(projectId.value);
       projectName.value = g.project?.name || '';
       data = { nodes: g.nodes, edges: g.edges, cross: g.cross };
     } else {
       data = await api.graph({
         key_only: keyOnly.value ? 1 : undefined,
         cross_org: crossOnly.value ? 1 : undefined,
+        with_projects: showProjects.value ? 1 : 0,
         limit: 300,
       });
     }
@@ -593,6 +598,32 @@ async function load() {
     loading.value = false;
   }
 }
+
+/** 项目节点开关：关掉后只剩人与人、人与单位，图更清爽 */
+function toggleProjects() {
+  showProjects.value = !showProjects.value;
+  load();
+}
+
+/**
+ * 地址栏参数变化时重新加载。
+ * 关键：Vue Router 会复用同一个组件实例，之前把 query 读成常量，
+ * 从项目关系图切回关系图时不会重新计算，图就一直停在项目视角。
+ */
+watch(
+  () => route.query,
+  (q) => {
+    const nextProject = Number(q.project) || null;
+    const nextCross = q.cross_org === '1';
+    if (nextProject === projectId.value && nextCross === crossOnly.value) return;
+    projectId.value = nextProject;
+    crossOnly.value = nextCross;
+    if (nextProject) keyOnly.value = false;
+    projectName.value = '';
+    load();
+  },
+  { deep: true }
+);
 
 /** 切到跨单位视角：布局会重算（节点集变了），所以走重新加载 */
 function toggleCrossOnly() {
@@ -737,6 +768,10 @@ onBeforeUnmount(() => {
           <button v-if="!projectId" class="pill" :class="{ 'pill--cross': crossOnly }" @click="toggleCrossOnly">
             <van-icon name="exchange" />
             跨单位
+          </button>
+          <button v-if="!projectId" class="pill" :class="{ 'pill--on': showProjects }" @click="toggleProjects">
+            <van-icon name="cluster-o" />
+            项目
           </button>
           <button class="pill" @click="relayout">
             <van-icon name="replay" />
@@ -930,11 +965,20 @@ onBeforeUnmount(() => {
 .topbar-inner {
   max-width: 780px;
   margin: 0 auto;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
   pointer-events: auto;
 }
+
+/* 标题一行、筛选按钮一行：移动端 4 个按钮挤在一行会把标题压断行 */
+.topbar-inner .row.gap-6 {
+  margin-top: 8px;
+  gap: 6px;
+  flex-wrap: nowrap;
+  overflow-x: auto;
+  padding-bottom: 2px;
+  scrollbar-width: none;
+}
+
+.topbar-inner .row.gap-6::-webkit-scrollbar { display: none; }
 
 .tb-left { display: flex; align-items: center; gap: 7px; min-width: 0; }
 .tb-back { font-size: 19px; color: var(--c-text-2); cursor: pointer; flex-shrink: 0; }
@@ -955,7 +999,7 @@ onBeforeUnmount(() => {
 
 .meta {
   max-width: 780px;
-  margin: 4px auto 0;
+  margin: 6px auto 0;
   font-size: 12px;
   color: var(--c-text-3);
   font-variant-numeric: tabular-nums;
@@ -965,6 +1009,8 @@ onBeforeUnmount(() => {
   display: inline-flex;
   align-items: center;
   gap: 3px;
+  white-space: nowrap;
+  flex: none;
   border: 1px solid var(--c-border);
   background: rgba(255, 255, 255, .95);
   color: var(--c-text-2);

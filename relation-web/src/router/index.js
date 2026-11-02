@@ -1,6 +1,20 @@
 import { createRouter, createWebHistory } from 'vue-router';
+import { useAuthStore } from '@/stores/auth';
 
 const routes = [
+  {
+    path: '/login',
+    name: 'login',
+    component: () => import('@/views/LoginView.vue'),
+    meta: { title: '登录', public: true },
+  },
+  {
+    path: '/admin',
+    name: 'admin',
+    component: () => import('@/views/AdminView.vue'),
+    // 普通账号也能进来改密码 / 退出，管理区块在页面内按角色隐藏
+    meta: { title: '账号与共享' },
+  },
   {
     path: '/',
     name: 'today',
@@ -76,6 +90,24 @@ const router = createRouter({
   scrollBehavior(to, from, saved) {
     return saved || { top: 0 };
   },
+});
+
+router.beforeEach(async (to) => {
+  const auth = useAuthStore();
+  if (!auth.ready) await auth.loadMe();
+
+  // 已登录还去登录页，直接回首页
+  if (to.meta.public) {
+    if (auth.user && to.path === '/login') return '/';
+    return true;
+  }
+
+  if (!auth.user) {
+    return { path: '/login', query: to.fullPath !== '/' ? { redirect: to.fullPath } : {} };
+  }
+
+  if (to.meta.admin && !auth.isAdmin) return '/';
+  return true;
 });
 
 router.afterEach((to) => {

@@ -18,7 +18,9 @@ const show = computed(() => route.meta.nav === true);
 const active = computed(() => (route.name === 'project' ? 'projects' : route.name));
 
 const go = (path) => {
-  if (route.path !== path) router.push(path);
+  // 用 fullPath 比较：/graph?project=23 与 /graph 路径相同，
+  // 若只比 path，点「关系图」不会清掉项目参数，会一直停在项目视角
+  if (route.fullPath !== path) router.push(path);
 };
 </script>
 

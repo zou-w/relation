@@ -118,8 +118,20 @@ function goManage() {
   router.push('/manage');
 }
 
-function downloadTemplate() {
-  window.location.href = api.templateUrl();
+async function downloadTemplate() {
+  try {
+    const blob = await api.downloadTemplate();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = '人脉关系网-联系人导入模板.xlsx';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 2000);
+  } catch (e) {
+    showToast(e.message || '下载失败');
+  }
 }
 
 onMounted(async () => {

@@ -11,6 +11,8 @@ import { join } from 'node:path';
 import { initDBAsync, createSchema, getDriver, closeDB, ROOT } from './db/driver.js';
 import { ENUMS } from './lib/enums.js';
 import { initCrypto } from './lib/crypto.js';
+import { ensureDefaultAdmin, migrateLegacyData } from './lib/auth.js';
+import { authRequired } from './middleware/auth.js';
 
 import personsRouter from './routes/persons.js';
 import resourcesRouter from './routes/resources.js';
@@ -20,6 +22,8 @@ import relationsRouter from './routes/relations.js';
 import graphRouter from './routes/graph.js';
 import importRouter from './routes/import.js';
 import projectsRouter from './routes/projects.js';
+import authRouter from './routes/auth.js';
+import adminRouter from './routes/admin.js';
 
 const PORT = Number(process.env.PORT) || 3100;
 const HOST = process.env.HOST || '0.0.0.0';
@@ -28,6 +32,8 @@ async function bootstrap() {
   initCrypto(); // 先确保加密密钥就绪并落盘
   const driver = await initDBAsync();
   createSchema();
+  ensureDefaultAdmin();     // 没有任何账号时先建一个超管，别把自己锁在门外
+  migrateLegacyData();      // 老库补 owner_id，并把 'me' 的历史数据交给超管
   console.log(`[db] 驱动: ${driver} · 已就绪`);
 
   const app = express();
@@ -56,14 +62,18 @@ async function bootstrap() {
     res.json(ENUMS);
   });
 
-  app.use('/api/persons', personsRouter);
-  app.use('/api/resources', resourcesRouter);
-  app.use('/api/events', eventsRouter);
-  app.use('/api/orgs', orgsRouter);
-  app.use('/api/relations', relationsRouter);
-  app.use('/api/graph', graphRouter);
-  app.use('/api/import', importRouter);
-  app.use('/api/projects', projectsRouter);
+  // 登录相关接口公开；其余业务接口一律要求登录
+  app.use('/api/auth', authRouter);
+  app.use('/api/admin', authRequired, adminRouter);
+
+  app.use('/api/persons', authRequired, personsRouter);
+  app.use('/api/resources', authRequired, resourcesRouter);
+  app.use('/api/events', authRequired, eventsRouter);
+  app.use('/api/orgs', authRequired, orgsRouter);
+  app.use('/api/relations', authRequired, relationsRouter);
+  app.use('/api/graph', authRequired, graphRouter);
+  app.use('/api/import', authRequired, importRouter);
+  app.use('/api/projects', authRequired, projectsRouter);
 
   // 生产环境托管前端静态文件
   const webDist = join(ROOT, '../relation-web/dist');

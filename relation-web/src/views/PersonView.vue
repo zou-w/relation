@@ -187,7 +187,12 @@ onMounted(load);
             </div>
           </div>
 
-          <div class="profile-actions">
+          <div v-if="person.is_shared" class="shared-note">
+            <van-icon name="info-o" />
+            这是{{ person.owner_name ? `「${person.owner_name}」` : '别人' }}共享给你的数据，只能查看，不能修改
+          </div>
+
+          <div v-if="!person.is_shared" class="profile-actions">
             <button v-if="!person.is_self" class="pa" :class="{ 'pa--on': person.is_key_contact }" @click="toggleKey">
               <van-icon :name="person.is_key_contact ? 'star' : 'star-o'" />
               {{ person.is_key_contact ? '重点' : '标重点' }}
@@ -214,7 +219,10 @@ onMounted(load);
             </a>
           </div>
 
-          <div v-if="person.remark" class="profile-remark">{{ person.remark }}</div>
+          <div v-if="person.remark" class="profile-remark">
+            <span class="pr-label">备注</span>
+            <span class="pr-text">{{ person.remark }}</span>
+          </div>
 
           <div class="kv-list" v-if="person.phone || person.wechat || person.birthday">
             <div v-if="person.phone" class="kv"><span class="k">手机</span><span class="v">{{ person.phone }}</span></div>
@@ -272,7 +280,7 @@ onMounted(load);
         <!-- 资源画像 -->
         <div class="section-title">
           资源画像
-          <button class="mini-btn" @click="showAttr = true">
+          <button v-if="!person.is_shared" class="mini-btn" @click="showAttr = true">
             <van-icon name="plus" /> 添加
           </button>
         </div>
@@ -372,7 +380,7 @@ onMounted(load);
         <!-- 接触记录 -->
         <div class="section-title">
           接触记录
-          <button class="mini-btn" @click="showEvent = true">
+          <button v-if="!person.is_shared" class="mini-btn" @click="showEvent = true">
             <van-icon name="plus" /> 记录
           </button>
         </div>
@@ -521,13 +529,39 @@ onMounted(load);
 
 .cross-hint { font-size: 11.5px; color: #7e22ce; text-transform: none; letter-spacing: 0; font-weight: 500; }
 
+.shared-note {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: #7e22ce;
+  background: #faf5ff;
+  border: 1px solid #e9d5ff;
+  border-radius: 9px;
+  padding: 7px 10px;
+  margin-bottom: 10px;
+}
+
 .profile-remark {
   margin-top: 12px;
-  padding-top: 12px;
-  border-top: 1px solid var(--c-border);
+  padding: 10px 11px;
+  background: #f8f9fb;
+  border-radius: 9px;
   font-size: 13.5px;
   color: var(--c-text-2);
   line-height: 1.6;
+}
+.pr-label {
+  display: inline-block;
+  font-size: 10.5px;
+  font-weight: 600;
+  color: var(--c-text-3);
+  background: #fff;
+  border: 1px solid var(--c-border);
+  border-radius: 5px;
+  padding: 0 5px;
+  margin-right: 6px;
+  vertical-align: 1px;
 }
 
 .kv-list {

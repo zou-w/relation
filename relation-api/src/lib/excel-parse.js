@@ -10,6 +10,7 @@ import ExcelJS from 'exceljs';
 import { COLUMNS } from './excel-template.js';
 import { enumKey, enumLabels } from './enums.js';
 import { all } from '../db/driver.js';
+import { personScope } from './scope.js';
 
 const MAX_ROWS = 500;
 const MAX_ATTRS = 8;
@@ -128,7 +129,7 @@ function splitAttrs(raw) {
 /* ============================================================
  * 主解析流程
  * ========================================================== */
-export async function parseWorkbook(buffer, { checkDuplicate = true } = {}) {
+export async function parseWorkbook(buffer, { checkDuplicate = true, ctx = null } = {}) {
   const wb = new ExcelJS.Workbook();
   await wb.xlsx.load(buffer);
 
@@ -189,13 +190,14 @@ export async function parseWorkbook(buffer, { checkDuplicate = true } = {}) {
   /* -------- 已有数据索引（用于判重） -------- */
   let existingIndex = new Map();
   if (checkDuplicate) {
+    const ps = personScope(ctx, 'p');
     const rows = all(`
       SELECT p.id, p.name,
              (SELECT o.name FROM employments e JOIN organizations o ON o.id = e.org_id
               WHERE e.person_id = p.id AND e.is_current = 1 LIMIT 1) AS org_name
         FROM persons p
-       WHERE p.is_self = 0
-    `);
+       WHERE p.is_self = 0 AND ${ps.sql}
+    `, ps.params);
     for (const r of rows) {
       existingIndex.set(`${(r.name || '').trim()}||${(r.org_name || '').trim()}`, r.id);
     }

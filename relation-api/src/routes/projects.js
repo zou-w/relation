@@ -8,6 +8,7 @@ import { isValidEnum, enumValues, enumLabel } from '../lib/enums.js';
 import {
   findProjects, countProjects, getProject, personProjects, projectStats, projectGraph,
 } from '../lib/projects.js';
+import { canWriteProject, personScope, orgScope } from '../lib/scope.js';
 
 const router = Router();
 
@@ -54,19 +55,19 @@ router.get('/', (req, res) => {
   const size = Math.min(Math.max(Number(limit) || 50, 1), 200);
   const skip = Math.max(Number(offset) || 0, 0);
 
-  const items = findProjects({ ...opts, limit: size, offset: skip }).map((p) => ({
+  const items = findProjects({ ...opts, limit: size, offset: skip }, req.ctx).map((p) => ({
     ...p,
     status_label: enumLabel('project_status', p.status),
     project_type_label: enumLabel('project_type', p.project_type),
   }));
 
-  res.json({ total: countProjects(opts), items, offset: skip });
+  res.json({ total: countProjects(opts, req.ctx), items, offset: skip });
 });
 
 /* ---------------- 概览（必须放在 /:id 之前） ---------------- */
 
 router.get('/stats', (req, res) => {
-  res.json(projectStats());
+  res.json(projectStats(req.ctx));
 });
 
 /* ---------------- 新建 ---------------- */
@@ -76,17 +77,20 @@ router.post('/', (req, res) => {
   if (!d.name) return res.status(400).json({ error: '项目名称必填' });
   if (!checkEnum(res, 'project_type', d.project_type, '项目类型')) return;
   if (!checkEnum(res, 'project_status', d.status, '项目状态')) return;
-  if (d.owner_org_id && !get('SELECT 1 FROM organizations WHERE id = ?', [d.owner_org_id])) {
-    return res.status(400).json({ error: '业主单位不存在' });
+  if (d.owner_org_id) {
+    const os = orgScope(req.ctx, 'o');
+    const org = get(`SELECT o.id FROM organizations o WHERE o.id = ? AND ${os.sql}`,
+      [d.owner_org_id, ...os.params]);
+    if (!org) return res.status(400).json({ error: '业主单位不存在，或没有查看权限' });
   }
 
   const info = run(
     `INSERT INTO projects
        (name, code, project_type, status, owner_org_id, our_role, region, amount,
-        start_date, end_date, milestone, is_key, remark)
-     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+        start_date, end_date, milestone, is_key, remark, owner_id)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
     [d.name, d.code, d.project_type, d.status, d.owner_org_id, d.our_role, d.region,
-     d.amount, d.start_date, d.end_date, d.milestone, d.is_key, d.remark]
+     d.amount, d.start_date, d.end_date, d.milestone, d.is_key, d.remark, req.ctx.userId]
   );
   res.status(201).json({ ok: true, id: info.lastInsertRowid });
 });
@@ -94,8 +98,9 @@ router.post('/', (req, res) => {
 /* ---------------- 详情 ---------------- */
 
 router.get('/:id', (req, res) => {
-  const p = getProject(Number(req.params.id));
-  if (!p) return res.status(404).json({ error: '项目不存在' });
+  const p = getProject(Number(req.params.id), req.ctx);
+  if (!p) return res.status(404).json({ error: '项目不存在，或没有查看权限' });
+  p.can_edit = canWriteProject(req.ctx, p.id);
   p.status_label = enumLabel('project_status', p.status);
   p.project_type_label = enumLabel('project_type', p.project_type);
   res.json(p);
@@ -107,6 +112,9 @@ router.patch('/:id', (req, res) => {
   const id = Number(req.params.id);
   const exist = get('SELECT * FROM projects WHERE id = ?', [id]);
   if (!exist) return res.status(404).json({ error: '项目不存在' });
+  if (!canWriteProject(req.ctx, id)) {
+    return res.status(403).json({ error: '这是别人共享给你的项目，只能查看' });
+  }
 
   const d = normalizeProject({ ...exist, ...req.body });
   if (!d.name) return res.status(400).json({ error: '项目名称必填' });
@@ -131,6 +139,9 @@ router.delete('/:id', (req, res) => {
   const id = Number(req.params.id);
   const exist = get('SELECT 1 FROM projects WHERE id = ?', [id]);
   if (!exist) return res.status(404).json({ error: '项目不存在' });
+  if (!canWriteProject(req.ctx, id)) {
+    return res.status(403).json({ error: '这是别人共享给你的项目，不能删除' });
+  }
   run('DELETE FROM projects WHERE id = ?', [id]);
   res.json({ ok: true, deleted: 1 });
 });
@@ -142,6 +153,9 @@ router.post('/:id/members', (req, res) => {
   const projectId = Number(req.params.id);
   if (!get('SELECT 1 FROM projects WHERE id = ?', [projectId])) {
     return res.status(404).json({ error: '项目不存在' });
+  }
+  if (!canWriteProject(req.ctx, projectId)) {
+    return res.status(403).json({ error: '这是别人共享给你的项目，不能调整成员' });
   }
 
   const b = req.body || {};
@@ -182,6 +196,9 @@ router.post('/:id/members', (req, res) => {
 router.patch('/:id/members/:memberId', (req, res) => {
   const projectId = Number(req.params.id);
   const memberId = Number(req.params.memberId);
+  if (!canWriteProject(req.ctx, projectId)) {
+    return res.status(403).json({ error: '这是别人共享给你的项目，不能调整成员' });
+  }
   const exist = get(
     'SELECT * FROM project_members WHERE id = ? AND project_id = ?',
     [memberId, projectId]
@@ -201,6 +218,9 @@ router.patch('/:id/members/:memberId', (req, res) => {
 
 /** 移除成员 */
 router.delete('/:id/members/:memberId', (req, res) => {
+  if (!canWriteProject(req.ctx, Number(req.params.id))) {
+    return res.status(403).json({ error: '这是别人共享给你的项目，不能调整成员' });
+  }
   const info = run(
     'DELETE FROM project_members WHERE id = ? AND project_id = ?',
     [Number(req.params.memberId), Number(req.params.id)]
@@ -214,6 +234,9 @@ router.post('/:id/members/batch', (req, res) => {
   const projectId = Number(req.params.id);
   if (!get('SELECT 1 FROM projects WHERE id = ?', [projectId])) {
     return res.status(404).json({ error: '项目不存在' });
+  }
+  if (!canWriteProject(req.ctx, projectId)) {
+    return res.status(403).json({ error: '这是别人共享给你的项目，不能调整成员' });
   }
   const list = Array.isArray(req.body?.members) ? req.body.members : [];
   if (!list.length) return res.status(400).json({ error: 'members 不能为空' });
@@ -259,7 +282,7 @@ router.post('/:id/members/batch', (req, res) => {
 /* ---------------- 局部关系网 ---------------- */
 
 router.get('/:id/graph', (req, res) => {
-  const g = projectGraph(Number(req.params.id));
+  const g = projectGraph(Number(req.params.id), req.ctx);
   if (!g) return res.status(404).json({ error: '项目不存在' });
   res.json(g);
 });
@@ -278,8 +301,8 @@ router.get('/:id/candidates', (req, res) => {
            EXISTS (SELECT 1 FROM project_members pm
                     WHERE pm.project_id = ? AND pm.person_id = p.id) AS joined
       FROM persons p
-     WHERE p.is_self = 0`;
-  const params = [projectId];
+     WHERE p.is_self = 0 AND ${personScope(req.ctx, 'p').sql}`;
+  const params = [projectId, ...personScope(req.ctx, 'p').params];
   if (keyword) {
     sql += ` AND (p.name LIKE ? OR EXISTS (
                SELECT 1 FROM employments e2 JOIN organizations o2 ON o2.id = e2.org_id

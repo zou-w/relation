@@ -6,6 +6,7 @@ import { all, get, run, transaction } from '../db/driver.js';
 import { encrypt, decrypt, maskPhone } from '../lib/crypto.js';
 import { isValidEnum, enumValues } from '../lib/enums.js';
 import { findPersons, countPersons, getPerson, ensureOrg } from '../lib/queries.js';
+import { canWritePerson, personScope } from '../lib/scope.js';
 
 const router = Router();
 
@@ -40,8 +41,8 @@ router.get('/', (req, res) => {
   }
 
   const base = { keyword: kw, keyOnly, orgId, hasAttr, missingPhone };
-  const items = findPersons({ ...base, limit: size, offset: skip });
-  const total = countPersons(base);
+  const items = findPersons({ ...base, limit: size, offset: skip }, req.ctx);
+  const total = countPersons(base, req.ctx);
 
   res.json({ total, items, page_size: size, offset: skip });
 });
@@ -60,8 +61,8 @@ router.post('/', (req, res) => {
   const result = transaction(() => {
     const p = run(
       `INSERT INTO persons (name, title, gender, phone, wechat, email, birthday,
-                            met_way, is_key_contact, sensitivity, remark)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
+                            met_way, is_key_contact, sensitivity, remark, owner_id)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
       [
         String(b.name).trim(),
         b.title || b.position || null,
@@ -74,13 +75,14 @@ router.post('/', (req, res) => {
         b.is_key_contact ? 1 : 0,
         b.sensitivity || 'normal',
         b.remark || null,
+        req.ctx.userId,
       ]
     );
     const personId = p.lastInsertRowid;
 
     let orgId = null;
     if (b.org_name) {
-      orgId = ensureOrg(String(b.org_name).trim());
+      orgId = ensureOrg(String(b.org_name).trim(), req.ctx);
       run(
         `INSERT INTO employments (person_id, org_id, position, department, power_level, is_current)
          VALUES (?,?,?,?,?,1)`,
@@ -110,9 +112,12 @@ router.post('/batch-delete', (req, res) => {
   if (ids.length > 500) return res.status(400).json({ error: '单次最多删除 500 人' });
 
   const placeholders = ids.map(() => '?').join(',');
-  // 本人节点保护
+  // 本人节点保护 + 只允许删自己的数据（超管例外）
   const selfs = all(`SELECT id FROM persons WHERE id IN (${placeholders}) AND is_self = 1`, ids);
-  const deletable = ids.filter((id) => !selfs.some((s) => s.id === id));
+  const owned = req.ctx.isAdmin
+    ? ids
+    : all(`SELECT id FROM persons WHERE id IN (${placeholders}) AND owner_id = ?`, [...ids, req.ctx.userId]).map((r) => r.id);
+  const deletable = owned.filter((id) => !selfs.some((s) => s.id === id));
 
   let deleted = 0;
   if (deletable.length) {
@@ -130,8 +135,8 @@ router.post('/batch-delete', (req, res) => {
 
 /* ---------------- 详情 ---------------- */
 router.get('/:id', (req, res) => {
-  const p = getPerson(Number(req.params.id));
-  if (!p) return res.status(404).json({ error: '联系人不存在' });
+  const p = getPerson(Number(req.params.id), req.ctx);
+  if (!p) return res.status(404).json({ error: '联系人不存在，或没有查看权限' });
   res.json(p);
 });
 
@@ -140,6 +145,9 @@ router.patch('/:id', (req, res) => {
   const id = Number(req.params.id);
   const exist = get('SELECT * FROM persons WHERE id = ?', [id]);
   if (!exist) return res.status(404).json({ error: '联系人不存在' });
+  if (!canWritePerson(req.ctx, id)) {
+    return res.status(403).json({ error: '这是别人共享给你的数据，只能查看，不能修改' });
+  }
 
   const b = req.body || {};
   checkEnum('met_way', b.met_way, '认识途径');
@@ -163,7 +171,7 @@ router.patch('/:id', (req, res) => {
 
   // 任职变更
   if (b.org_name) {
-    const orgId = ensureOrg(b.org_name);
+    const orgId = ensureOrg(b.org_name, req.ctx);
     run('UPDATE employments SET is_current = 0, end_date = date(\'now\',\'localtime\') WHERE person_id = ? AND is_current = 1', [id]);
     run(
       `INSERT INTO employments (person_id, org_id, position, department, power_level, is_current)
@@ -180,7 +188,7 @@ router.patch('/:id', (req, res) => {
     run(`UPDATE persons SET ${fields.join(', ')} WHERE id = ?`, params);
   }
 
-  res.json({ ok: true, person: getPerson(id) });
+  res.json({ ok: true, person: getPerson(id, req.ctx) });
 });
 
 /* ---------------- 删除 ---------------- */
@@ -188,6 +196,9 @@ router.delete('/:id', (req, res) => {
   const id = Number(req.params.id);
   const exist = get('SELECT id, is_self FROM persons WHERE id = ?', [id]);
   if (!exist) return res.status(404).json({ error: '联系人不存在' });
+  if (!canWritePerson(req.ctx, id)) {
+    return res.status(403).json({ error: '这是别人共享给你的数据，不能删除' });
+  }
   if (exist.is_self) return res.status(400).json({ error: '不能删除本人节点' });
   run('DELETE FROM persons WHERE id = ?', [id]);
   res.json({ ok: true });
@@ -196,8 +207,9 @@ router.delete('/:id', (req, res) => {
 /* ---------------- 一跳邻居（图谱按需加载） ---------------- */
 router.get('/:id/neighbors', (req, res) => {
   const id = Number(req.params.id);
-  const person = get('SELECT id, name FROM persons WHERE id = ?', [id]);
-  if (!person) return res.status(404).json({ error: '联系人不存在' });
+  const scope = personScope(req.ctx, 'p');
+  const person = get(`SELECT p.id, p.name FROM persons p WHERE p.id = ? AND ${scope.sql}`, [id, ...scope.params]);
+  if (!person) return res.status(404).json({ error: '联系人不存在，或没有查看权限' });
 
   const neighbors = all(
     `SELECT DISTINCT p.id, p.name, p.is_key_contact,
@@ -226,6 +238,9 @@ router.post('/:id/attributes', (req, res) => {
   if (!get('SELECT id FROM persons WHERE id = ?', [id])) {
     return res.status(404).json({ error: '联系人不存在' });
   }
+  if (!canWritePerson(req.ctx, id)) {
+    return res.status(403).json({ error: '这是别人共享给你的数据，只能查看' });
+  }
   const b = req.body || {};
   if (!b.attr_type || !b.attr_value) {
     return res.status(400).json({ error: 'attr_type 与 attr_value 必填' });
@@ -240,6 +255,9 @@ router.post('/:id/attributes', (req, res) => {
 });
 
 router.delete('/:id/attributes/:attrId', (req, res) => {
+  if (!canWritePerson(req.ctx, Number(req.params.id))) {
+    return res.status(403).json({ error: '这是别人共享给你的数据，只能查看' });
+  }
   const info = run('DELETE FROM person_attributes WHERE id = ? AND person_id = ?',
     [Number(req.params.attrId), Number(req.params.id)]);
   if (!info.changes) return res.status(404).json({ error: '画像不存在' });

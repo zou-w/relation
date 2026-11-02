@@ -6,13 +6,27 @@
 import 'dotenv/config';
 import { initDBAsync, createSchema, run, get, transaction, closeDB } from './driver.js';
 import { encrypt, initCrypto } from '../lib/crypto.js';
+import { ensureDefaultAdmin, createUser, migrateLegacyData } from '../lib/auth.js';
 
 initCrypto(); // 先确保密钥就绪，种子数据才会用持久密钥加密
 const driver = await initDBAsync();
 createSchema();
 
-// 幂等：清空后重灌（保留结构）
+// 账号不随数据重置：已存在就复用，避免每次 seed 把密码改回去
+const admin = ensureDefaultAdmin()
+  || get("SELECT * FROM users WHERE role = 'super_admin' ORDER BY id LIMIT 1");
+migrateLegacyData(); // 老库补 relations.owner_id
+let demo = get("SELECT * FROM users WHERE username = 'demo'");
+if (!demo) {
+  demo = createUser({
+    username: 'demo', password: 'demo123', displayName: '演示账号',
+    role: 'user', createdBy: String(admin.id),
+  });
+}
+
+// 幂等：清空后重灌（保留结构与账号）
 transaction(() => {
+  run('DELETE FROM data_shares');
   run('DELETE FROM project_members');
   run('DELETE FROM projects');
   run('DELETE FROM contact_events');
@@ -224,10 +238,62 @@ transaction(() => {
     '从建筑市场监管角度提供政策口径建议', 0);
 });
 
+// ---------- 演示数据归到超管名下 ----------
+const adminId = String(admin.id);
+transaction(() => {
+  for (const t of ['persons', 'organizations', 'projects', 'relations']) {
+    run(`UPDATE ${t} SET owner_id = ? WHERE owner_id = 'me'`, [adminId]);
+  }
+});
+
+// ---------- 普通账号 demo：自己的本人节点 + 一个自己录的联系人 ----------
+const demoId = String(demo.id);
+const demoOrg = run(
+  `INSERT INTO organizations (name, alias, org_type, region, business, owner_id)
+   VALUES (?,?,?,?,?,?)`,
+  ['杭州城投建设有限公司', '城投建设', 'enterprise', '杭州', '市政基础设施投资建设', demoId]
+).lastInsertRowid;
+
+const demoSelf = run(
+  `INSERT INTO persons (name, title, is_self, owner_id, remark)
+   VALUES (?,?,1,?,?)`,
+  ['我', '本人', demoId, 'demo 账号的关系网中心']
+).lastInsertRowid;
+run(
+  `INSERT INTO employments (person_id, org_id, position, power_level, is_current)
+   VALUES (?,?,?,?,1)`,
+  [demoSelf, demoOrg, '项目经理', 'operator']
+);
+
+const demoPerson = run(
+  `INSERT INTO persons (name, title, gender, phone, met_way, is_key_contact, remark, owner_id)
+   VALUES (?,?,?,?,?,1,?,?)`,
+  ['周涛', '副总经理', 'male', encrypt('13800006666'), 'work',
+   'demo 自己录入的联系人：只应出现在 demo 的列表里', demoId]
+).lastInsertRowid;
+run(
+  `INSERT INTO employments (person_id, org_id, position, power_level, is_current)
+   VALUES (?,?,?,?,1)`,
+  [demoPerson, demoOrg, '副总经理', 'decision']
+);
+
+// ---------- 共享演示：超管把两个人共享给 demo ----------
+transaction(() => {
+  for (const pid of [personId.zhang, personId.li]) {
+    run(
+      `INSERT INTO data_shares (owner_id, grantee_id, person_id, granted_by, note)
+       VALUES (?,?,?,?,?)`,
+      [adminId, demoId, pid, adminId, '演示：共享给 demo 只读查看']
+    );
+  }
+});
+
 const count = (t) => get(`SELECT COUNT(*) AS c FROM ${t}`).c;
 console.log('✅ 演示数据已写入');
 console.log(`   联系人 ${count('persons')} · 组织 ${count('organizations')} · 任职 ${count('employments')}`);
 console.log(`   资源画像 ${count('person_attributes')} · 关系 ${count('relations')} · 接触事件 ${count('contact_events')}`);
 console.log(`   项目 ${count('projects')} · 项目成员 ${count('project_members')}`);
+console.log(`   账号 ${count('users')} · 数据共享 ${count('data_shares')}`);
+console.log(`   超级管理员 ${admin.username} / admin123 · 演示账号 demo / demo123`);
 console.log(`   驱动: ${driver}`);
 closeDB();

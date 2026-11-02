@@ -5,6 +5,7 @@ import { Router } from 'express';
 import { all, get, run } from '../db/driver.js';
 import { isValidEnum, enumValues } from '../lib/enums.js';
 import { pendingEvents, coldContacts } from '../lib/queries.js';
+import { canWritePerson, personScope } from '../lib/scope.js';
 
 const router = Router();
 
@@ -16,6 +17,9 @@ router.post('/', (req, res) => {
 
   const person = get('SELECT id FROM persons WHERE id = ?', [Number(b.person_id)]);
   if (!person) return res.status(404).json({ error: '联系人不存在' });
+  if (!canWritePerson(req.ctx, Number(b.person_id))) {
+    return res.status(403).json({ error: '这是别人共享给你的数据，只能查看，不能记录接触' });
+  }
 
   if (b.scene && !isValidEnum('scene', b.scene)) {
     return res.status(400).json({
@@ -55,8 +59,8 @@ router.get('/', (req, res) => {
              FROM contact_events ce
              JOIN persons p ON p.id = ce.person_id
              LEFT JOIN organizations o ON o.id = ce.org_id
-             WHERE 1=1`;
-  const params = [];
+             WHERE ${personScope(req.ctx, 'p').sql}`;
+  const params = [...personScope(req.ctx, 'p').params];
   if (person_id) { sql += ' AND ce.person_id = ?'; params.push(Number(person_id)); }
   sql += ' ORDER BY ce.event_date DESC LIMIT ?';
   params.push(Math.min(Number(limit) || 50, 200));
@@ -65,19 +69,22 @@ router.get('/', (req, res) => {
 
 /** 待办跟进：逾期 / 今日 / 未来 N 天 */
 router.get('/pending', (req, res) => {
-  res.json(pendingEvents(Number(req.query.days) || 7));
+  res.json(pendingEvents(Number(req.query.days) || 7, req.ctx));
 });
 
 /** 冷接触提醒 */
 router.get('/cold', (req, res) => {
-  res.json({ items: coldContacts(Number(req.query.days) || 30) });
+  res.json({ items: coldContacts(Number(req.query.days) || 30, req.ctx) });
 });
 
 /** 勾选完成 */
 router.patch('/:id', (req, res) => {
   const id = Number(req.params.id);
-  const exist = get('SELECT id FROM contact_events WHERE id = ?', [id]);
+  const exist = get('SELECT id, person_id FROM contact_events WHERE id = ?', [id]);
   if (!exist) return res.status(404).json({ error: '事件不存在' });
+  if (!canWritePerson(req.ctx, exist.person_id)) {
+    return res.status(403).json({ error: '这条记录属于别人共享的数据，不能修改' });
+  }
 
   const b = req.body || {};
   const fields = [];
@@ -95,6 +102,10 @@ router.patch('/:id', (req, res) => {
 
 /** 删除 */
 router.delete('/:id', (req, res) => {
+  const row = get('SELECT person_id FROM contact_events WHERE id = ?', [Number(req.params.id)]);
+  if (row && !canWritePerson(req.ctx, row.person_id)) {
+    return res.status(403).json({ error: '这条记录属于别人共享的数据，不能删除' });
+  }
   const info = run('DELETE FROM contact_events WHERE id = ?', [Number(req.params.id)]);
   if (!info.changes) return res.status(404).json({ error: '事件不存在' });
   res.json({ ok: true });

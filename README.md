@@ -36,7 +36,7 @@
             ↓
      Node.js (Express)  API      ← 57MB 常驻
             ↓
-     SQLite (单文件)             ← 9 张表
+     SQLite (单文件)             ← 12 张表
 ```
 
 | 层 | 选型 | 说明 |
@@ -65,6 +65,15 @@ npm start                       # 启动，默认 3100 端口
 
 首次启动会自动生成 `.env` 并写入加密密钥，**这个文件要立刻备份**（见安全章节）。
 
+首次启动还会创建一个超级管理员：
+
+| 账号 | 密码 | 角色 |
+|---|---|---|
+| `admin` | `admin123` | 超级管理员 |
+| `demo` | `demo123` | 普通账号（seed 时创建） |
+
+> 登录后第一件事是改密码。生产环境可用 `ADMIN_USER` / `ADMIN_PASSWORD` 环境变量指定初始账号。
+
 ### 2. 前端
 
 ```bash
@@ -88,7 +97,7 @@ cd ../relation-api && npm start       # 会自动托管 ../relation-web/dist
 
 ## 四、数据模型
 
-9 张表，四条主线：**人－组织－事件**是骨架，**资源画像**是价值，**关系**是杠杆，**项目**是事由。
+12 张表。业务上四条主线：**人－组织－事件**是骨架，**资源画像**是价值，**关系**是杠杆，**项目**是事由；另有三张表负责账号与授权。
 
 | 表 | 作用 | 关键字段 |
 |---|---|---|
@@ -101,6 +110,11 @@ cd ../relation-api && npm start       # 会自动托管 ../relation-web/dist
 | `org_relations` | 组织↔组织 | `relation_type` |
 | `projects` | **项目** | `status`（筹备/投标/进行/结项/失单）、`owner_org_id`（业主）、`amount` |
 | `project_members` | 项目参与人 | `role_type`（负责/商务/技术/审批/引荐/顾问）、`role_title`、`duty`、`is_key` |
+| `users` | 账号 | `username`、`password_hash`（scrypt）、`role`（super_admin/user）、`status` |
+| `sessions` | 登录会话 | `token`、`expires_at`（30 天） |
+| `data_shares` | 数据共享 | `owner_id`、`grantee_id`、`person_id`（空 = 整份数据） |
+
+每条业务数据都带 `owner_id`（`persons` / `organizations` / `projects` / `relations`），这是隔离的根。
 
 ### 三个关键设计
 
@@ -127,9 +141,48 @@ cd ../relation-api && npm start       # 会自动托管 ../relation-web/dist
 
 识别结果同时喂给三处：图谱（紫红粗线 + 两端紫圈）、联系人详情（关系列表标"跨单位"）、搭线路径（"我→李伟→赵敏"这种跨单位的二跳路径优先排前面）。
 
+### 账号与数据隔离
+
+| 角色 | 能看到什么 | 能改什么 |
+|---|---|---|
+| 普通账号 | 自己录入的人 / 单位 / 项目 / 关系，加上别人共享给他的 | 只有自己的 |
+| 超级管理员 | 全部账号的全部数据 | 全部，并可管理账号与共享 |
+
+规则落在 SQL 层，不靠前端藏按钮：`src/lib/scope.js` 生成可见性条件，所有查询都带上 `ctx`。共享是**只读**的——被共享人能看到、能拿来搭关系、能在自己的图谱里用，但不能改对方的原始记录（`403`）。
+
+共享粒度两种：整份数据（`person_id` 为空）或指定联系人。单位与项目跟着人走，否则图谱会断。
+
+> 老库升级：启动时自动 `ALTER TABLE relations ADD COLUMN owner_id`，并把历史上 `owner_id='me'` 的数据交给第一个超管，不会丢数据。
+
 ---
 
 ## 五、API 一览
+
+所有 `/api/*` 业务接口都需要携带 `Authorization: Bearer <token>`，只有健康检查、枚举、登录注册公开。
+
+### 账号
+```
+POST   /api/auth/register       注册（普通账号，注册即登录）
+POST   /api/auth/login          登录，返回 token
+GET    /api/auth/me             当前账号 + 我的数据量 / 共享统计
+POST   /api/auth/logout         退出
+PATCH  /api/auth/password       改密码
+PATCH  /api/auth/profile        改显示名 / 电话 / 备注
+```
+
+### 超管后台（普通账号 403）
+```
+GET    /api/admin/users                 账号列表（含数据量、在线会话数）
+POST   /api/admin/users                 新建账号
+PATCH  /api/admin/users/:id             改显示名 / 角色 / 启停
+POST   /api/admin/users/:id/password    重置密码（强制下线）
+DELETE /api/admin/users/:id             删账号（名下数据转给操作者）
+GET    /api/admin/sessions              活跃会话（登录时间 / IP / 设备）
+GET    /api/admin/shares                共享关系
+POST   /api/admin/shares                新建共享（整份或指定人）
+DELETE /api/admin/shares/:id            取消共享
+GET    /api/admin/users/:id/persons     某账号名下的人（共享时挑选）
+```
 
 ### 基础
 ```
@@ -232,7 +285,7 @@ GET    /api/projects/:id/candidates           可选人员池（标记谁已加�
 GET    /api/projects/:id/graph                单项目局部关系网
 ```
 
-**共 46 个接口，冒烟测试 65 项全部通过。**
+**共 60 个接口，冒烟测试 85 项全部通过。**
 
 ---
 
@@ -472,19 +525,22 @@ console.log(db.prepare('SELECT name, phone FROM persons WHERE phone IS NOT NULL'
 
 ### 访问控制
 
-当前是**单用户、无登录**设计。放到公网前建议二选一：
+系统自带账号体系，不再依赖 Nginx Basic Auth：
 
-- **Nginx Basic Auth**（最省事）
-  ```bash
-  sudo apt install apache2-utils
-  sudo htpasswd -c /etc/nginx/.htpasswd yourname
-  # 在 server 块加：
-  auth_basic "Restricted";
-  auth_basic_user_file /etc/nginx/.htpasswd;
-  ```
-- **IP 白名单**：`allow 你的IP; deny all;`
+- 口令用 **scrypt** 加盐哈希存储，不落明文
+- 登录签发随机 token（`sessions` 表，30 天有效），每个账号最多保留 3 个活跃会话
+- 停用账号 / 重置密码会立即删除该账号所有会话，已登录设备下次请求即被踢下线
+- 权限判断在服务端：所有查询带 `ctx`，普通账号的 SQL 里直接拼可见范围，改别人的数据返回 `403`
+- 公开注册默认开启；如果不想让人自助注册，可在 Nginx 层拦掉 `POST /api/auth/register`，或只由超管在后台建号
 
-`sensitivity` 字段已预留（normal/sensitive/secret），未来多人共享时可据此做字段级可见性控制。
+仍建议叠加一层 **IP 白名单** 作为纵深防御：
+
+```nginx
+allow 你的IP;
+deny all;
+```
+
+`sensitivity` 字段已预留（normal/sensitive/secret），后续可做字段级脱敏（如对共享数据隐藏手机号）。
 
 ### 合规边界
 
@@ -504,7 +560,10 @@ console.log(db.prepare('SELECT name, phone FROM persons WHERE phone IS NOT NULL'
 后端冒烟测试（`npm run smoke`）：
 
 ```
-基础       ✅ 健康检查 / 枚举字典
+基础       ✅ 健康检查 / 枚举字典 / 未登录被拦 / 错误密码被拒
+账号权限   ✅ 超管登录 / 当前账号 / 普通账号登录 / 只能看自己的+共享
+           ✅ 共享数据只读 / 越权修改 403 / 普通账号进后台 403 / 图谱同样隔离
+           ✅ 超管建号 / 建立共享 / 被共享人可见 / 取消共享立即失效 / 删号
 联系人     ✅ 查人 / 按单位搜 / 重点筛选 / 快速录入(自动建组织)
            ✅ 详情 / 加密还原 / 枚举校验 / 编辑 / 打标 / 邻居
 资源检索   ✅ 关键词 / 类型筛选 / 圈子渗透度 / 枚举校验 / 总览
@@ -525,7 +584,7 @@ Excel 导入 ✅ 模板下载(28KB) / 中文件名 / 字段清单 / 空表拒绝
 批量管理   ✅ 空 ids 拒绝 / 本人节点保护
 清理       ✅ 级联删除
 
-70/70 通过
+85/85 通过
 ```
 
 实测输出示例：
@@ -542,8 +601,7 @@ Excel 导入 ✅ 模板下载(28KB) / 中文件名 / 字段清单 / 空表拒绝
 
 | 优先级 | 事项 | 理由 |
 |---|---|---|
-| 高 | **访问登录** | 上公网前必须解决 |
-| 高 | Excel 批量导入 | 存量通讯录一次性灌入 |
+| 高 | **操作审计日志** | 谁能改共享、谁重置了密码，现在只有结果没有记录 |
 | 中 | 生日提醒 | `birthday` 字段已在，缺定时扫描 |
 | 中 | 图谱按组织聚合 | 节点多了需要折叠单位 |
 | 低 | 迁 PostgreSQL | 多人协作或数据量上万时 |
@@ -560,20 +618,24 @@ relation-api/
 ├── src/
 │   ├── server.js           入口
 │   ├── db/
-│   │   ├── schema.sql      9 张表
+│   │   ├── schema.sql      12 张表
 │   │   ├── driver.js       双驱动封装
 │   │   ├── init.js         建表
 │   │   └── seed.js         演示数据
 │   ├── lib/
 │   │   ├── crypto.js       AES-256-GCM + 密钥持久化
+│   │   ├── auth.js         口令哈希 / 会话 / 默认超管 / 历史数据迁移
+│   │   ├── scope.js        数据可见范围（所有查询的权限条件都在这）
 │   │   ├── enums.js        枚举字典 + 中文标签反解
 │   │   ├── queries.js      核心查询（资源/路径/影响力/图谱）
 │   │   ├── cross-org.js    跨单位认识识别（判定规则集中在这一个文件）
 │   │   ├── projects.js     项目查询（列表/详情/成员/局部图谱）
 │   │   ├── excel-template.js  模板生成（样式/批注/下拉/说明页）
 │   │   └── excel-parse.js     模板解析与逐行校验
-│   └── routes/             persons / resources / events / orgs / relations / graph / import / projects
-└── test/smoke.js           70 项冒烟测试
+│   ├── middleware/auth.js  Bearer 校验 / 超管校验
+│   └── routes/             auth / admin / persons / resources / events / orgs
+│                           relations / graph / import / projects
+└── test/smoke.js           85 项冒烟测试
 
 docs/
 └── import-template.xlsx    导入模板快照（权威版本以 API 为准）
@@ -584,11 +646,13 @@ relation-web/
 ├── dist/                   构建产物
 └── src/
     ├── main.js / App.vue
-    ├── api/index.js        统一请求封装
-    ├── router/index.js
+    ├── api/index.js        统一请求封装（自动带 token，401 跳登录）
+    ├── stores/auth.js      登录态
+    ├── router/index.js     路由守卫
     ├── styles/global.css   设计令牌
     ├── components/TabBar.vue / OrgInput.vue / ProjectFormSheet.vue
-    └── views/              Today / Search / Resources / Graph / Record / Person
+    └── views/              Login（登录注册）/ Admin（账号与共享）
+                            Today / Search / Resources / Graph / Record / Person
                             Projects / Project / Manage（人员管理）/ Import（导入向导）
                             RelRecord（记录跨单位认识）
 ```

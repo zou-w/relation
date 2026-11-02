@@ -4,8 +4,10 @@ import { useRouter } from 'vue-router';
 import { showToast, showSuccessToast, showConfirmDialog, showLoadingToast, closeToast } from 'vant';
 import api from '@/api';
 import OrgInput from '@/components/OrgInput.vue';
+import { useAuthStore } from '@/stores/auth';
 
 const router = useRouter();
+const auth = useAuthStore();
 
 const items = ref([]);
 const total = ref(0);
@@ -263,6 +265,19 @@ onMounted(() => {
           共 {{ stats.persons || total }} 人 · {{ stats.keyContacts || 0 }} 位重点 · {{ stats.orgs || 0 }} 个单位
         </div>
 
+        <div class="acct-bar">
+          <span class="ab-avatar">{{ (auth.displayName || '我').slice(0, 1) }}</span>
+          <span class="ab-name">{{ auth.displayName }}</span>
+          <span class="tag" :class="auth.isAdmin ? 'tag--warn' : 'tag--gray'">
+            {{ auth.isAdmin ? '超管' : '个人' }}
+          </span>
+          <span class="grow"></span>
+          <button class="ab-link" @click="router.push('/admin')">
+            {{ auth.isAdmin ? '账号与共享' : '我的账号' }}
+            <van-icon name="arrow" size="12" />
+          </button>
+        </div>
+
         <div class="acts">
           <button class="act act--primary" @click="goImport">
             <van-icon name="down" />
@@ -356,6 +371,7 @@ onMounted(() => {
               <span v-if="p.is_self" class="tag tag--success">我</span>
               <span v-if="p.is_key_contact" class="tag tag--warn">重点</span>
               <span v-if="p.attr_count" class="tag">{{ p.attr_count }} 资源</span>
+              <span v-if="p.is_shared" class="tag tag--cross">共享</span>
             </div>
             <div class="p-sub ellipsis">
               <template v-if="p.org_name">
@@ -364,11 +380,25 @@ onMounted(() => {
               <template v-else-if="p.title">{{ p.title }}</template>
               <template v-else>未填单位</template>
             </div>
+            <div
+              v-if="auth.isAdmin && p.owner_name && p.owner_id !== String(auth.user?.id)"
+              class="p-owner"
+            >来自 {{ p.owner_name }}</div>
+            <div v-if="p.phone || p.remark" class="p-extra ellipsis">
+              <span v-if="p.phone" class="pe-phone">{{ p.phone }}</span>
+              <span v-if="p.phone && p.remark" class="pe-dot">·</span>
+              <span v-if="p.remark">{{ p.remark }}</span>
+            </div>
           </div>
 
-          <button v-if="!selectMode && !p.is_self" class="edit-btn" @click.stop="openEdit(p)">
+          <button
+            v-if="!selectMode && !p.is_self && !p.is_shared"
+            class="edit-btn"
+            @click.stop="openEdit(p)"
+          >
             <van-icon name="edit" />
           </button>
+          <van-icon v-else-if="!selectMode && p.is_shared" name="lock" class="p-lock" />
           <van-icon v-else-if="!selectMode" name="arrow" class="p-arrow" />
         </div>
 
@@ -470,6 +500,29 @@ onMounted(() => {
 </template>
 
 <style scoped>
+.acct-bar {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin-top: 10px;
+  padding: 8px 10px;
+  background: #fff;
+  border: 1px solid var(--c-border);
+  border-radius: 11px;
+}
+.ab-avatar {
+  width: 26px; height: 26px; border-radius: 8px;
+  display: grid; place-items: center;
+  background: linear-gradient(135deg, #2563eb, #4f46e5);
+  color: #fff; font-size: 11px; font-weight: 600; flex: none;
+}
+.ab-name { font-size: 13px; font-weight: 600; }
+.ab-link {
+  border: 0; background: transparent; color: var(--c-primary);
+  font-size: 12.5px; font-weight: 500; font-family: inherit;
+  display: inline-flex; align-items: center; gap: 2px; cursor: pointer;
+  padding: 2px 0;
+}
 .acts {
   display: flex;
   gap: 8px;
@@ -584,6 +637,17 @@ onMounted(() => {
 }
 
 .p-name { font-weight: 600; font-size: 15.5px; }
+.p-owner { font-size: 11px; color: #7e22ce; margin-top: 2px; }
+
+.p-extra {
+  font-size: 11.5px;
+  color: var(--c-text-3);
+  margin-top: 2px;
+}
+.pe-phone { color: var(--c-text-2); font-variant-numeric: tabular-nums; }
+.pe-dot { margin: 0 4px; opacity: .6; }
+.p-lock { color: var(--c-text-3); font-size: 15px; flex: none; }
+
 .p-sub { font-size: 13px; color: var(--c-text-2); margin-top: 2px; }
 .p-arrow { color: var(--c-text-3); font-size: 14px; }
 

@@ -1,5 +1,22 @@
 <script setup>
+import { onMounted, onBeforeUnmount } from 'vue';
+import { useRouter } from 'vue-router';
 import TabBar from '@/components/TabBar.vue';
+import { useAuthStore } from '@/stores/auth';
+
+const router = useRouter();
+const auth = useAuthStore();
+
+/** token 过期 / 被踢下线：清状态并回登录页 */
+function onExpired() {
+  auth.clear();
+  if (router.currentRoute.value.path !== '/login') {
+    router.replace({ path: '/login', query: { redirect: router.currentRoute.value.fullPath } });
+  }
+}
+
+onMounted(() => window.addEventListener('auth:expired', onExpired));
+onBeforeUnmount(() => window.removeEventListener('auth:expired', onExpired));
 </script>
 
 <template>

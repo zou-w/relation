@@ -19,13 +19,21 @@ function ok(name, cond, detail = '') {
   }
 }
 
-async function req(method, path, body) {
-  const opt = { method, headers: { 'Content-Type': 'application/json' } };
+let TOKEN = '';
+
+async function reqAs(token, method, path, body) {
+  const headers = { 'Content-Type': 'application/json' };
+  if (token) headers.Authorization = `Bearer ${token}`;
+  const opt = { method, headers };
   if (body) opt.body = JSON.stringify(body);
   const r = await fetch(BASE + path, opt);
   let data = null;
   try { data = await r.json(); } catch { data = null; }
   return { status: r.status, data };
+}
+
+async function req(method, path, body) {
+  return reqAs(TOKEN, method, path, body);
 }
 
 const P = (s) => encodeURIComponent(s);
@@ -38,6 +46,81 @@ async function main() {
   {
     const { status, data } = await req('GET', '/api/health');
     ok('健康检查', status === 200 && data.ok, `驱动 ${data?.driver}`);
+  }
+  {
+    const { status } = await reqAs('', 'GET', '/api/persons');
+    ok('未登录被拦截', status === 401, `HTTP ${status}`);
+  }
+  {
+    const bad = await reqAs('', 'POST', '/api/auth/login', { username: 'admin', password: 'wrong' });
+    ok('错误密码被拒', bad.status === 401, `HTTP ${bad.status}`);
+  }
+
+  // ---------- 登录 ----------
+  console.log('\n【登录与权限】');
+  {
+    const { status, data } = await reqAs('', 'POST', '/api/auth/login',
+      { username: 'admin', password: 'admin123' });
+    TOKEN = data?.token || '';
+    ok('超管登录', status === 200 && !!TOKEN && data.user.role === 'super_admin',
+      `${data?.user?.display_name}`);
+  }
+  {
+    const { status, data } = await req('GET', '/api/auth/me');
+    ok('当前账号信息', status === 200 && data.user.username === 'admin',
+      `自己 ${data?.stats?.own_persons} 人 / 共享给我 ${data?.stats?.shared_persons} 人`);
+  }
+  {
+    const { status, data } = await reqAs('', 'POST', '/api/auth/login',
+      { username: 'demo', password: 'demo123' });
+    const demoToken = data?.token;
+    ok('普通账号登录', status === 200 && data?.user?.role === 'user');
+
+    const list = await reqAs(demoToken, 'GET', '/api/persons');
+    const names = list.data.items.map((x) => x.name);
+    ok('普通账号只看自己的 + 被共享的', list.data.total === 4 &&
+      list.data.items.every((x) => !x.is_self || x.owner_id === String(data.user.id)),
+      `${list.data.total} 人：${names.join('、')}`);
+
+    const shared = list.data.items.find((x) => x.is_shared);
+    ok('共享数据标记为只读', !!shared && shared.editable === false, shared?.name);
+
+    const deny = await reqAs(demoToken, 'PATCH', `/api/persons/${shared?.id}`, { remark: '越权修改' });
+    ok('不能修改共享数据', deny.status === 403, `HTTP ${deny.status}`);
+
+    const adminDeny = await reqAs(demoToken, 'GET', '/api/admin/users');
+    ok('普通账号不能进后台', adminDeny.status === 403, `HTTP ${adminDeny.status}`);
+
+    const graph = await reqAs(demoToken, 'GET', '/api/graph');
+    const labels = graph.data.nodes.filter((n) => n.kind === 'person').map((n) => n.label);
+    ok('图谱同样按账号隔离', graph.data.nodes.length > 0 && !labels.includes('赵敏'),
+      `可见：${labels.join('、')}`);
+  }
+  {
+    // 超管建一个临时账号，整份共享后应能看到超管的数据
+    const uname = `t${Date.now().toString().slice(-6)}`;
+    const created = await req('POST', '/api/admin/users',
+      { username: uname, password: 'test123', display_name: '临时账号' });
+    ok('超管创建账号', created.status === 201 && created.data.user.id > 0, uname);
+
+    const newId = created.data.user.id;
+    const share = await req('POST', '/api/admin/shares',
+      { owner_id: 1, grantee_id: newId, person_id: null });
+    ok('超管建立共享', share.status === 201, `share#${share.data?.id}`);
+
+    const tLogin = await reqAs('', 'POST', '/api/auth/login',
+      { username: uname, password: 'test123' });
+    const tList = await reqAs(tLogin.data.token, 'GET', '/api/persons');
+    ok('被共享人能看整份数据', tList.status === 200 && tList.data.total >= 5,
+      `${tList.data.total} 人`);
+
+    const del = await req('DELETE', `/api/admin/shares/${share.data.id}`);
+    const tList2 = await reqAs(tLogin.data.token, 'GET', '/api/persons');
+    ok('取消共享后立即失效', del.status === 200 && tList2.data.total === 0,
+      `${tList2.data.total} 人`);
+
+    const gone = await req('DELETE', `/api/admin/users/${newId}`);
+    ok('超管删除账号', gone.status === 200);
   }
   {
     const { status, data } = await req('GET', '/api/enums');
@@ -291,7 +374,7 @@ async function main() {
   const raw = async (path, buf, type = 'application/octet-stream') => {
     const r = await fetch(BASE + path, {
       method: 'POST',
-      headers: { 'Content-Type': type },
+      headers: { 'Content-Type': type, Authorization: `Bearer ${TOKEN}` },
       body: buf,
     });
     let data = null;
@@ -301,7 +384,8 @@ async function main() {
 
   let tplBuf = null;
   {
-    const r = await fetch(BASE + '/api/import/template');
+    const r = await fetch(BASE + '/api/import/template',
+      { headers: { Authorization: `Bearer ${TOKEN}` } });
     const buf = Buffer.from(await r.arrayBuffer());
     tplBuf = buf;
     const isZip = buf[0] === 0x50 && buf[1] === 0x4b;

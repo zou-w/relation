@@ -5,11 +5,17 @@
 import { all, get } from '../db/driver.js';
 import { decrypt } from './crypto.js';
 import { enumLabel } from './enums.js';
+import { projectScope, personScope } from './scope.js';
 
 /** 拼装筛选条件，列表与计数共用 */
-function projectWhere({ keyword, status, personId, keyOnly, orgId } = {}) {
+function projectWhere({ keyword, status, personId, keyOnly, orgId } = {}, ctx = null) {
   let sql = ' WHERE 1=1';
   const params = [];
+
+  // 自己的项目 + 自己可见的人所在的项目
+  const scope = projectScope(ctx, 'pr');
+  sql += ` AND ${scope.sql}`;
+  params.push(...scope.params);
 
   if (keyword) {
     sql += ` AND (pr.name LIKE ? OR pr.code LIKE ? OR pr.remark LIKE ?
@@ -39,8 +45,8 @@ function projectWhere({ keyword, status, personId, keyOnly, orgId } = {}) {
 /** 项目列表：带成员数、关键成员名、业主单位 */
 export function findProjects({
   keyword, status, personId, keyOnly, orgId, limit = 50, offset = 0,
-} = {}) {
-  const where = projectWhere({ keyword, status, personId, keyOnly, orgId });
+} = {}, ctx = null) {
+  const where = projectWhere({ keyword, status, personId, keyOnly, orgId }, ctx);
 
   const rows = all(
     `SELECT pr.*,
@@ -65,20 +71,21 @@ export function findProjects({
   }));
 }
 
-export function countProjects(opts = {}) {
-  const where = projectWhere(opts);
+export function countProjects(opts = {}, ctx = null) {
+  const where = projectWhere(opts, ctx);
   return get(`SELECT COUNT(*) AS n FROM projects pr ${where.sql}`, where.params)?.n || 0;
 }
 
 /** 项目详情：含业主单位与全部成员（按角色排序） */
-export function getProject(id) {
+export function getProject(id, ctx = null) {
+  const scope = projectScope(ctx, 'pr');
   const project = get(
     `SELECT pr.*, o.name AS owner_org_name, o.org_type AS owner_org_type,
             o.region AS owner_region
        FROM projects pr
        LEFT JOIN organizations o ON o.id = pr.owner_org_id
-      WHERE pr.id = ?`,
-    [id]
+      WHERE pr.id = ? AND ${scope.sql}`,
+    [id, ...scope.params]
   );
   if (!project) return null;
 
@@ -121,7 +128,8 @@ function summarizeRoles(members) {
 }
 
 /** 某人参与的项目 */
-export function personProjects(personId) {
+export function personProjects(personId, ctx = null) {
+  void ctx; // 调用方已确认这个人可见，其参与的项目随之可见
   return all(
     `SELECT pr.id, pr.name, pr.status, pr.project_type, pr.is_key,
             pm.role_type, pm.role_title, pm.duty, pm.is_key AS member_is_key,
@@ -136,17 +144,30 @@ export function personProjects(personId) {
 }
 
 /** 项目概览统计 */
-export function projectStats() {
+export function projectStats(ctx = null) {
+  const scope = projectScope(ctx, 'pr');
+  const ps = personScope(ctx, 'p');
   const one = (sql, p = []) => Object.values(get(sql, p) || {})[0] ?? 0;
+  const scoped = `SELECT COUNT(*) FROM projects pr WHERE ${scope.sql}`;
   return {
-    total: one('SELECT COUNT(*) FROM projects'),
-    active: one("SELECT COUNT(*) FROM projects WHERE status IN ('active','bidding')"),
-    keyProjects: one('SELECT COUNT(*) FROM projects WHERE is_key = 1'),
-    members: one('SELECT COUNT(DISTINCT person_id) FROM project_members'),
+    total: one(scoped, scope.params),
+    active: one(`${scoped} AND pr.status IN ('active','bidding')`, scope.params),
+    keyProjects: one(`${scoped} AND pr.is_key = 1`, scope.params),
+    members: one(
+      `SELECT COUNT(DISTINCT pm.person_id) FROM project_members pm
+        JOIN projects pr ON pr.id = pm.project_id
+        JOIN persons p ON p.id = pm.person_id
+       WHERE ${scope.sql} AND ${ps.sql}`,
+      [...scope.params, ...ps.params]
+    ),
     // 项目里出现、但平时没标重点的人 —— 容易被忽略的关键人
-    hiddenKeys: one(`SELECT COUNT(DISTINCT pm.person_id) FROM project_members pm
-                     JOIN persons p ON p.id = pm.person_id
-                     WHERE pm.is_key = 1 AND p.is_key_contact = 0`),
+    hiddenKeys: one(
+      `SELECT COUNT(DISTINCT pm.person_id) FROM project_members pm
+        JOIN projects pr ON pr.id = pm.project_id
+        JOIN persons p ON p.id = pm.person_id
+       WHERE pm.is_key = 1 AND p.is_key_contact = 0 AND ${scope.sql} AND ${ps.sql}`,
+      [...scope.params, ...ps.params]
+    ),
   };
 }
 
@@ -154,12 +175,13 @@ export function projectStats() {
  * 单个项目的关系网：项目节点 + 成员 + 成员所属单位 + 成员之间已有的人际关系
  * 用于项目详情页的局部图谱
  */
-export function projectGraph(projectId) {
+export function projectGraph(projectId, ctx = null) {
+  const scope = projectScope(ctx, 'pr');
   const project = get(
     `SELECT pr.*, o.name AS owner_org_name FROM projects pr
        LEFT JOIN organizations o ON o.id = pr.owner_org_id
-      WHERE pr.id = ?`,
-    [projectId]
+      WHERE pr.id = ? AND ${scope.sql}`,
+    [projectId, ...scope.params]
   );
   if (!project) return null;
 

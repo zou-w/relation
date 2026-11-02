@@ -7,6 +7,7 @@ import { decrypt, maskPhone } from './crypto.js';
 import { enumLabel } from './enums.js';
 import { personProjects } from './projects.js';
 import { computeCrossOrg } from './cross-org.js';
+import { personScope, orgScope, projectScope, relationScope, visiblePersonIds, isForeign } from './scope.js';
 
 /** 把联系人行解密并补充当前任职信息 */
 function hydratePerson(row, opts = {}) {
@@ -14,6 +15,9 @@ function hydratePerson(row, opts = {}) {
   const p = { ...row };
   p.phone = opts.mask ? maskPhone(decrypt(p.phone)) : decrypt(p.phone);
   p.wechat = decrypt(p.wechat);
+  // 共享来的数据只读：前端据此隐藏编辑入口、显示"共享"标签
+  p.is_shared = opts.ctx ? isForeign(opts.ctx, p.owner_id) : false;
+  p.editable = !p.is_shared;
   return p;
 }
 
@@ -22,9 +26,14 @@ function hydratePerson(row, opts = {}) {
  * ============================================================ */
 
 /** 拼装联系人筛选条件，findPersons 与 countPersons 共用 */
-function personWhere({ keyword, keyOnly, orgId, hasAttr, missingPhone } = {}) {
+function personWhere({ keyword, keyOnly, orgId, hasAttr, missingPhone } = {}, ctx = null) {
   let sql = ' WHERE 1=1';
   const params = [];
+
+  // 数据可见范围：自己 + 被共享；超管不过滤
+  const scope = personScope(ctx, 'p');
+  sql += ` AND ${scope.sql}`;
+  params.push(...scope.params);
 
   if (keyword) {
     sql += ` AND (p.name LIKE ? OR p.title LIKE ? OR p.remark LIKE ?
@@ -51,11 +60,12 @@ function personWhere({ keyword, keyOnly, orgId, hasAttr, missingPhone } = {}) {
   return { sql, params };
 }
 
-export function findPersons({ keyword, keyOnly, orgId, hasAttr, missingPhone, limit = 50, offset = 0 }) {
-  const where = personWhere({ keyword, keyOnly, orgId, hasAttr, missingPhone });
+export function findPersons({ keyword, keyOnly, orgId, hasAttr, missingPhone, limit = 50, offset = 0 } = {}, ctx = null) {
+  const where = personWhere({ keyword, keyOnly, orgId, hasAttr, missingPhone }, ctx);
 
   const sql = `
     SELECT p.*,
+           (SELECT u.display_name FROM users u WHERE CAST(u.id AS TEXT) = p.owner_id) AS owner_name,
            (SELECT o.name FROM employments e JOIN organizations o ON o.id = e.org_id
             WHERE e.person_id = p.id AND e.is_current = 1 LIMIT 1) AS org_name,
            (SELECT e.position FROM employments e
@@ -67,19 +77,24 @@ export function findPersons({ keyword, keyOnly, orgId, hasAttr, missingPhone, li
     LIMIT ? OFFSET ?
   `;
 
-  return all(sql, [...where.params, limit, offset]).map((r) => hydratePerson(r));
+  return all(sql, [...where.params, limit, offset]).map((r) => hydratePerson(r, { ctx }));
 }
 
 /** 与 findPersons 同条件的总数，用于分页 */
-export function countPersons(opts = {}) {
-  const where = personWhere(opts);
+export function countPersons(opts = {}, ctx = null) {
+  const where = personWhere(opts, ctx);
   return get(`SELECT COUNT(*) AS n FROM persons p ${where.sql}`, where.params)?.n || 0;
 }
 
-export function getPerson(id) {
-  const row = get('SELECT * FROM persons WHERE id = ?', [id]);
+export function getPerson(id, ctx = null) {
+  const scope = personScope(ctx, 'p');
+  const row = get(
+    `SELECT p.*, (SELECT u.display_name FROM users u WHERE CAST(u.id AS TEXT) = p.owner_id) AS owner_name
+       FROM persons p WHERE p.id = ? AND ${scope.sql}`,
+    [id, ...scope.params]
+  );
   if (!row) return null;
-  const person = hydratePerson(row);
+  const person = hydratePerson(row, { ctx });
 
   person.employments = all(
     `SELECT e.*, o.name AS org_name, o.org_type, o.region, o.level
@@ -93,14 +108,15 @@ export function getPerson(id) {
     [id]
   );
 
+  const rScope = relationScope(ctx, 'r');
   person.relations = all(
     `SELECT r.*, p.name AS other_name,
             (SELECT o.name FROM employments e JOIN organizations o ON o.id = e.org_id
              WHERE e.person_id = p.id AND e.is_current = 1 LIMIT 1) AS other_org
      FROM relations r
      JOIN persons p ON p.id = CASE WHEN r.from_person = ? THEN r.to_person ELSE r.from_person END
-     WHERE r.from_person = ? OR r.to_person = ?`,
-    [id, id, id]
+     WHERE (r.from_person = ? OR r.to_person = ?) AND ${rScope.sql}`,
+    [id, id, id, ...rScope.params]
   );
 
   person.events = all(
@@ -116,7 +132,12 @@ export function getPerson(id) {
         WHERE e.is_current = 1 AND e.person_id IN (${involved.map(() => '?').join(',')})`,
       involved
     );
-    const flags = computeCrossOrg(person.relations, emps, all('SELECT id, name FROM organizations'));
+    const orgsScope = orgScope(ctx, 'o');
+    const flags = computeCrossOrg(
+      person.relations,
+      emps,
+      all(`SELECT o.id, o.name FROM organizations o WHERE ${orgsScope.sql}`, orgsScope.params)
+    );
     person.relations = person.relations.map((r) => {
       const f = flags.get(r.id) || {};
       return { ...r, is_cross_org: f.cross ? 1 : 0, cross_reason: f.reason || 'unknown' };
@@ -124,7 +145,7 @@ export function getPerson(id) {
   }
 
   // 参与的项目：项目是把关系落地的事由，详情页要能看到
-  person.projects = personProjects(id).map((p) => ({
+  person.projects = personProjects(id, ctx).map((p) => ({
     ...p,
     status_label: enumLabel('project_status', p.status),
     role_label: enumLabel('project_role', p.role_type),
@@ -137,11 +158,16 @@ export function getPerson(id) {
  * 按名称查找组织，没有则创建（供快速录入使用）
  * 返回 org_id
  */
-export function ensureOrg(orgName) {
+export function ensureOrg(orgName, ctx = null) {
   if (!orgName) return null;
-  const exist = get('SELECT id FROM organizations WHERE name = ? OR alias = ?', [orgName, orgName]);
+  const owner = ctx ? ctx.userId : 'me';
+  // 只在自己名下的单位里找，避免和别人的同名单位混在一起
+  const exist = get(
+    'SELECT id FROM organizations WHERE (name = ? OR alias = ?) AND owner_id = ? LIMIT 1',
+    [orgName, orgName, owner]
+  );
   if (exist) return exist.id;
-  const info = run('INSERT INTO organizations (name) VALUES (?)', [orgName]);
+  const info = run('INSERT INTO organizations (name, owner_id) VALUES (?,?)', [orgName, owner]);
   return info.lastInsertRowid;
 }
 
@@ -149,7 +175,8 @@ export function ensureOrg(orgName) {
  * 2. 资源检索（第一价值：借资源）
  * ============================================================ */
 
-export function searchResources({ keyword, attrType, minWeight = 1, limit = 50 }) {
+export function searchResources({ keyword, attrType, minWeight = 1, limit = 50 }, ctx = null) {
+  const scope = personScope(ctx, 'p');
   let sql = `
     SELECT pa.*, p.name AS person_name, p.title, p.is_key_contact,
            (SELECT o.name FROM employments e JOIN organizations o ON o.id = e.org_id
@@ -158,9 +185,9 @@ export function searchResources({ keyword, attrType, minWeight = 1, limit = 50 }
             WHERE e.person_id = p.id AND e.is_current = 1 LIMIT 1) AS power_level
     FROM person_attributes pa
     JOIN persons p ON p.id = pa.person_id
-    WHERE pa.weight >= ?
+    WHERE pa.weight >= ? AND ${scope.sql}
   `;
-  const params = [minWeight];
+  const params = [minWeight, ...scope.params];
 
   if (keyword) {
     sql += ' AND (pa.attr_value LIKE ? OR pa.note LIKE ?)';
@@ -178,7 +205,8 @@ export function searchResources({ keyword, attrType, minWeight = 1, limit = 50 }
 }
 
 /** 圈子渗透度：按圈子聚合人数与覆盖情况 */
-export function sphereStats() {
+export function sphereStats(ctx = null) {
+  const scope = personScope(ctx, 'p');
   return all(`
     SELECT attr_value AS sphere,
            COUNT(*) AS total,
@@ -186,10 +214,10 @@ export function sphereStats() {
            GROUP_CONCAT(p.name, '、') AS members
     FROM person_attributes pa
     JOIN persons p ON p.id = pa.person_id
-    WHERE pa.attr_type = 'sphere'
+    WHERE pa.attr_type = 'sphere' AND ${scope.sql}
     GROUP BY attr_value
     ORDER BY total DESC
-  `);
+  `, scope.params);
 }
 
 /* ============================================================
@@ -201,18 +229,30 @@ export function sphereStats() {
  * 一跳：直接认识
  * 二跳：我认识 A，A 与目标有关系
  */
-export function findPaths(targetId, maxHops = 2) {
-  const self = get('SELECT id, name FROM persons WHERE is_self = 1 LIMIT 1');
-  const target = get('SELECT id, name FROM persons WHERE id = ?', [targetId]);
-  if (!self || !target) return { self, target, paths: [] };
+export function findPaths(targetId, maxHops = 2, ctx = null) {
+  const pScope = personScope(ctx, 'p');
+  // "我"优先取自己的本人节点；没有则取共享数据里的
+  const self = get(
+    `SELECT p.id, p.name FROM persons p
+      WHERE p.is_self = 1 AND ${pScope.sql}
+      ORDER BY CASE WHEN p.owner_id = ? THEN 0 ELSE 1 END, p.id LIMIT 1`,
+    [...pScope.params, ctx?.userId ?? '']
+  );
+  const target = get(
+    `SELECT p.id, p.name FROM persons p WHERE p.id = ? AND ${pScope.sql}`,
+    [targetId, ...pScope.params]
+  );
+  if (!self || !target) return { self, target, paths: [], crossList: [] };
 
   const paths = [];
+  const rScope = relationScope(ctx, 'r');
 
   // 一跳直达
   const direct = get(
-    `SELECT * FROM relations
-     WHERE (from_person = ? AND to_person = ?) OR (from_person = ? AND to_person = ?)`,
-    [self.id, targetId, targetId, self.id]
+    `SELECT r.* FROM relations r
+     WHERE ((r.from_person = ? AND r.to_person = ?) OR (r.from_person = ? AND r.to_person = ?))
+       AND ${rScope.sql}`,
+    [self.id, targetId, targetId, self.id, ...rScope.params]
   );
   if (direct) {
     paths.push({
@@ -229,14 +269,16 @@ export function findPaths(targetId, maxHops = 2) {
   if (maxHops >= 2) {
     const rows = all(
       `WITH my_network AS (
-         SELECT CASE WHEN from_person = ? THEN to_person ELSE from_person END AS pid,
-                relation_type, strength, influence
-         FROM relations WHERE from_person = ? OR to_person = ?
+         SELECT CASE WHEN r.from_person = ? THEN r.to_person ELSE r.from_person END AS pid,
+                r.relation_type, r.strength, r.influence
+         FROM relations r
+         WHERE (r.from_person = ? OR r.to_person = ?) AND ${rScope.sql}
        ),
        target_network AS (
-         SELECT CASE WHEN from_person = ? THEN to_person ELSE from_person END AS pid,
-                relation_type, strength, influence
-         FROM relations WHERE from_person = ? OR to_person = ?
+         SELECT CASE WHEN r.from_person = ? THEN r.to_person ELSE r.from_person END AS pid,
+                r.relation_type, r.strength, r.influence
+         FROM relations r
+         WHERE (r.from_person = ? OR r.to_person = ?) AND ${rScope.sql}
        )
        SELECT mn.pid AS via_id, p.name AS via_name,
               mn.relation_type AS my_rel, mn.strength AS my_strength,
@@ -247,7 +289,9 @@ export function findPaths(targetId, maxHops = 2) {
        JOIN target_network tn ON tn.pid = mn.pid
        JOIN persons p ON p.id = mn.pid
        WHERE mn.pid != ? AND mn.pid != ?`,
-      [self.id, self.id, self.id, targetId, targetId, targetId, self.id, targetId]
+      [self.id, self.id, self.id, ...rScope.params,
+       targetId, targetId, targetId, ...rScope.params,
+       self.id, targetId]
     );
 
     const targetName = target.name;
@@ -285,13 +329,16 @@ export function findPaths(targetId, maxHops = 2) {
   // 跨单位的人优先排在前面：同样两跳，能跨过去的那条价值更高
   paths.sort((a, b) => (Number(b.crossOrg) - Number(a.crossOrg)) || ((b.score || 0) - (a.score || 0)));
 
-  // 跨单位认识清单（两人都在图谱里即可）
-  const allRels = all('SELECT * FROM relations');
+  // 跨单位认识清单（两人都在可见范围内才算）
+  const allRels = all(`SELECT r.* FROM relations r WHERE ${rScope.sql}`, rScope.params);
+  const vp = visiblePersonIds(ctx);
   const flags = computeCrossOrg(
     allRels,
-    all('SELECT id, person_id, org_id, is_current FROM employments WHERE is_current = 1'),
-    all('SELECT id, name FROM organizations'),
-    { names: new Map(all('SELECT id, name FROM persons').map((p) => [p.id, p.name])) }
+    all(`SELECT e.id, e.person_id, e.org_id, e.is_current FROM employments e
+          WHERE e.is_current = 1 AND e.person_id IN (${vp.sql})`, vp.params),
+    all(`SELECT o.id, o.name FROM organizations o WHERE ${orgScope(ctx, 'o').sql}`, orgScope(ctx, 'o').params),
+    { names: new Map(all(`SELECT p.id, p.name FROM persons p WHERE ${personScope(ctx, 'p').sql}`,
+      personScope(ctx, 'p').params).map((p) => [p.id, p.name])) }
   );
   const crossList = allRels
     .filter((r) => flags.get(r.id)?.cross)
@@ -314,20 +361,22 @@ export function findPaths(targetId, maxHops = 2) {
 }
 
 /** 按组织找抓手：某单位我能通过谁搭上线 */
-export function orgReach(orgId) {
-  const org = get('SELECT * FROM organizations WHERE id = ?', [orgId]);
+export function orgReach(orgId, ctx = null) {
+  const oScope = orgScope(ctx, 'o');
+  const org = get(`SELECT o.* FROM organizations o WHERE o.id = ? AND ${oScope.sql}`, [orgId, ...oScope.params]);
   if (!org) return null;
 
+  const pScope = personScope(ctx, 'p');
   const insiders = all(
     `SELECT p.id, p.name, p.is_key_contact, e.position, e.power_level
      FROM employments e JOIN persons p ON p.id = e.person_id
-     WHERE e.org_id = ? AND e.is_current = 1`,
-    [orgId]
+     WHERE e.org_id = ? AND e.is_current = 1 AND ${pScope.sql}`,
+    [orgId, ...pScope.params]
   );
 
   const reachable = insiders.map((p) => ({
     ...p,
-    paths: findPaths(p.id).paths,
+    paths: findPaths(p.id, 2, ctx).paths,
   }));
 
   return { org, insiders, reachable };
@@ -337,15 +386,16 @@ export function orgReach(orgId) {
  * 4. 影响力：谁能影响目标
  * ============================================================ */
 
-export function influencers(targetId) {
+export function influencers(targetId, ctx = null) {
+  const pScope = personScope(ctx, 'p');
   return all(
     `SELECT r.*, p.name AS person_name, p.is_key_contact,
             (SELECT o.name FROM employments e JOIN organizations o ON o.id = e.org_id
              WHERE e.person_id = p.id AND e.is_current = 1 LIMIT 1) AS org_name
      FROM relations r JOIN persons p ON p.id = r.from_person
-     WHERE r.to_person = ? AND r.influence >= 3
+     WHERE r.to_person = ? AND r.influence >= 3 AND ${pScope.sql}
      ORDER BY r.influence DESC`,
-    [targetId]
+    [targetId, ...pScope.params]
   );
 }
 
@@ -354,15 +404,17 @@ export function influencers(targetId) {
  * ============================================================ */
 
 /** 待办跟进：区分逾期 / 今日 / 未来 N 天 */
-export function pendingEvents(days = 7) {
+export function pendingEvents(days = 7, ctx = null) {
+  const pScope = personScope(ctx, 'p');
   const rows = all(
     `SELECT ce.*, p.name AS person_name, o.name AS org_name,
             CAST(julianday(ce.next_date) - julianday(date('now','localtime')) AS INTEGER) AS days_left
      FROM contact_events ce
      JOIN persons p ON p.id = ce.person_id
      LEFT JOIN organizations o ON o.id = ce.org_id
-     WHERE ce.is_done = 0 AND ce.next_date IS NOT NULL
-     ORDER BY ce.next_date ASC`
+     WHERE ce.is_done = 0 AND ce.next_date IS NOT NULL AND ${pScope.sql}
+     ORDER BY ce.next_date ASC`,
+    pScope.params
   );
 
   const overdue = [];
@@ -377,7 +429,8 @@ export function pendingEvents(days = 7) {
 }
 
 /** 冷接触：多久没联系 / 从未接触 */
-export function coldContacts(days = 30) {
+export function coldContacts(days = 30, ctx = null) {
+  const pScope = personScope(ctx, 'p');
   return all(
     `SELECT p.id, p.name, p.is_key_contact,
             (SELECT o.name FROM employments e JOIN organizations o ON o.id = e.org_id
@@ -389,12 +442,12 @@ export function coldContacts(days = 30) {
                       AS INTEGER)
                  ELSE NULL END AS days_since
      FROM persons p
-     WHERE p.is_self = 0
+     WHERE p.is_self = 0 AND ${pScope.sql}
        AND (NOT EXISTS (SELECT 1 FROM contact_events ce4 WHERE ce4.person_id = p.id)
             OR julianday(date('now','localtime')) -
                julianday((SELECT MAX(event_date) FROM contact_events ce5 WHERE ce5.person_id = p.id)) >= ?)
      ORDER BY p.is_key_contact DESC, days_since DESC`,
-    [days]
+    [...pScope.params, days]
   );
 }
 
@@ -402,8 +455,9 @@ export function coldContacts(days = 30) {
  * 6. 关系网图谱
  * ============================================================ */
 
-export function graphData({ keyOnly = false, limit = 200, withProjects = true, crossOnly = false } = {}) {
-  const personWhere = keyOnly ? 'WHERE p.is_key_contact = 1 OR p.is_self = 1' : '';
+export function graphData({ keyOnly = false, limit = 200, withProjects = true, crossOnly = false } = {}, ctx = null) {
+  const pScope = personScope(ctx, 'p');
+  const scopeSQL = `${pScope.sql}${keyOnly ? ' AND (p.is_key_contact = 1 OR p.is_self = 1)' : ''}`;
   let persons = all(
     `SELECT p.id, p.name, p.is_key_contact, p.is_self, p.title,
             (SELECT o.id FROM employments e JOIN organizations o ON o.id = e.org_id
@@ -412,10 +466,11 @@ export function graphData({ keyOnly = false, limit = 200, withProjects = true, c
              WHERE e.person_id = p.id AND e.is_current = 1 LIMIT 1) AS org_name,
             (SELECT e.power_level FROM employments e
              WHERE e.person_id = p.id AND e.is_current = 1 LIMIT 1) AS power_level
-     FROM persons p ${personWhere}
+     FROM persons p
+     WHERE ${scopeSQL}
      ORDER BY p.is_self DESC, p.is_key_contact DESC
      LIMIT ?`,
-    [limit]
+    [...pScope.params, limit]
   );
 
   let idSet = new Set(persons.map((p) => p.id));
@@ -424,24 +479,15 @@ export function graphData({ keyOnly = false, limit = 200, withProjects = true, c
   let crossOnlyApplied = false;
   if (crossOnly) {
     crossOnlyApplied = true;
-    const allPersons = all(
-      `SELECT p.id, p.name, p.is_key_contact, p.is_self, p.title,
-              (SELECT o.id FROM employments e JOIN organizations o ON o.id = e.org_id
-               WHERE e.person_id = p.id AND e.is_current = 1 LIMIT 1) AS org_id,
-              (SELECT o.name FROM employments e JOIN organizations o ON o.id = e.org_id
-               WHERE e.person_id = p.id AND e.is_current = 1 LIMIT 1) AS org_name,
-              (SELECT e.power_level FROM employments e
-               WHERE e.person_id = p.id AND e.is_current = 1 LIMIT 1) AS power_level
-       FROM persons p ${personWhere}
-       ORDER BY p.is_self DESC, p.is_key_contact DESC
-       LIMIT ?`,
-      [limit]
-    );
-    const allRels = all('SELECT * FROM relations');
+    const vp = visiblePersonIds(ctx);
+    const rScope = relationScope(ctx, 'r');
+    const allRels = all(`SELECT r.* FROM relations r WHERE ${rScope.sql}`, rScope.params);
     const allEmps = all(
-      `SELECT e.id, e.person_id, e.org_id, e.is_current FROM employments e WHERE e.is_current = 1`
+      `SELECT e.id, e.person_id, e.org_id, e.is_current FROM employments e
+        WHERE e.is_current = 1 AND e.person_id IN (${vp.sql})`, vp.params
     );
-    const allOrgs = all('SELECT id, name FROM organizations');
+    const oScope = orgScope(ctx, 'o');
+    const allOrgs = all(`SELECT o.id, o.name FROM organizations o WHERE ${oScope.sql}`, oScope.params);
     const flags = computeCrossOrg(allRels, allEmps, allOrgs);
     const keep = new Set();
     for (const r of allRels) {
@@ -450,7 +496,7 @@ export function graphData({ keyOnly = false, limit = 200, withProjects = true, c
         keep.add(r.to_person);
       }
     }
-    persons = allPersons.filter((p) => keep.has(p.id));
+    persons = persons.filter((p) => keep.has(p.id));
     idSet = new Set(persons.map((p) => p.id));
   }
   const orgIds = [...new Set(persons.map((p) => p.org_id).filter(Boolean))];
@@ -605,16 +651,30 @@ export function graphData({ keyOnly = false, limit = 200, withProjects = true, c
 }
 
 /** 首页统计概览 */
-export function stats() {
-  const one = (sql, p = []) => Object.values(get(sql, p) || {})[0] ?? 0;
+export function stats(ctx = null) {
+  const p = personScope(ctx, 'p');
+  const o = orgScope(ctx, 'o');
+  const r = relationScope(ctx, 'r');
+  const pr = projectScope(ctx, 'pr');
+  const one = (sql, params = []) => Object.values(get(sql, params) || {})[0] ?? 0;
   return {
-    persons: one('SELECT COUNT(*) FROM persons WHERE is_self = 0'),
-    keyContacts: one('SELECT COUNT(*) FROM persons WHERE is_key_contact = 1'),
-    orgs: one('SELECT COUNT(*) FROM organizations'),
-    relations: one('SELECT COUNT(*) FROM relations'),
-    events: one('SELECT COUNT(*) FROM contact_events'),
-    pending: one('SELECT COUNT(*) FROM contact_events WHERE is_done = 0 AND next_date IS NOT NULL'),
-    resources: one('SELECT COUNT(*) FROM person_attributes'),
-    projects: one('SELECT COUNT(*) FROM projects'),
+    persons: one(`SELECT COUNT(*) FROM persons p WHERE p.is_self = 0 AND ${p.sql}`, p.params),
+    keyContacts: one(`SELECT COUNT(*) FROM persons p WHERE p.is_key_contact = 1 AND ${p.sql}`, p.params),
+    orgs: one(`SELECT COUNT(*) FROM organizations o WHERE ${o.sql}`, o.params),
+    relations: one(`SELECT COUNT(*) FROM relations r WHERE ${r.sql}`, r.params),
+    events: one(
+      `SELECT COUNT(*) FROM contact_events ce JOIN persons p ON p.id = ce.person_id WHERE ${p.sql}`,
+      p.params
+    ),
+    pending: one(
+      `SELECT COUNT(*) FROM contact_events ce JOIN persons p ON p.id = ce.person_id
+        WHERE ce.is_done = 0 AND ce.next_date IS NOT NULL AND ${p.sql}`,
+      p.params
+    ),
+    resources: one(
+      `SELECT COUNT(*) FROM person_attributes pa JOIN persons p ON p.id = pa.person_id WHERE ${p.sql}`,
+      p.params
+    ),
+    projects: one(`SELECT COUNT(*) FROM projects pr WHERE ${pr.sql}`, pr.params),
   };
 }
