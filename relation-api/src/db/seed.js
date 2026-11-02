@@ -277,6 +277,18 @@ run(
   [demoPerson, demoOrg, '副总经理', 'decision']
 );
 
+// demo 自己的关系链：让「怎么搭上线」在演示账号里也能看到效果
+const demoRel = (from, to, type, strength, influence, note, owner) =>
+  run(
+    `INSERT INTO relations (from_person, to_person, relation_type, direction,
+                            strength, influence, note, owner_id)
+     VALUES (?,?,?,'two-way',?,?,?,?)`,
+    [from, to, type, strength, influence, note || null, String(owner)]
+  );
+demoRel(demoSelf, demoPerson, 'colleague', 4, 4, '同一家单位，长期项目搭档', demoId);
+demoRel(demoPerson, personId.zhang, 'introducer', 3, 4, '周涛在行业会议上认识张建国，可帮忙引荐', adminId);
+demoRel(demoPerson, personId.li, 'acquaintance', 3, 4, '周涛与李伟早年共事过', adminId);
+
 // ---------- 共享演示：超管把两个人共享给 demo ----------
 transaction(() => {
   for (const pid of [personId.zhang, personId.li]) {

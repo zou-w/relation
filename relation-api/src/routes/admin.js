@@ -6,7 +6,7 @@
  */
 import { Router } from 'express';
 import { all, get, run, transaction } from '../db/driver.js';
-import { createUser, hashPassword, publicUser } from '../lib/auth.js';
+import { createUser, hashPassword, publicUser, ensureSelfPerson } from '../lib/auth.js';
 import { adminOnly } from '../middleware/auth.js';
 
 const router = Router();
@@ -69,6 +69,7 @@ router.post('/users', (req, res, next) => {
       remark: b.remark || null,
       createdBy: req.ctx.userId,
     });
+    ensureSelfPerson(user.id, user.display_name || user.username);
     res.status(201).json({ ok: true, user: publicUser(user) });
   } catch (e) {
     next(e);
@@ -151,6 +152,8 @@ router.delete('/users/:id', (req, res) => {
   // 账号删除后，名下数据不删：先转交给当前超管，避免联系人变成"无主数据"
   transaction(() => {
     const uid = String(id);
+    // 对方的「我」节点降为普通联系人，否则转过来会和超管的「我」撞车
+    run('UPDATE persons SET is_self = 0 WHERE owner_id = ? AND is_self = 1', [uid]);
     for (const table of ['persons', 'organizations', 'projects', 'relations']) {
       run(`UPDATE ${table} SET owner_id = ? WHERE owner_id = ?`, [req.ctx.userId, uid]);
     }

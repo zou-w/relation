@@ -95,6 +95,12 @@ async function main() {
     const labels = graph.data.nodes.filter((n) => n.kind === 'person').map((n) => n.label);
     ok('图谱同样按账号隔离', graph.data.nodes.length > 0 && !labels.includes('赵敏'),
       `可见：${labels.join('、')}`);
+
+    const zhang = list.data.items.find((x) => x.name === '张建国');
+    const pth = await reqAs(demoToken, 'GET', `/api/resources/paths/${zhang.id}`);
+    ok('演示账号也能算出搭线路径',
+      pth.status === 200 && pth.data.hasSelf === true && pth.data.paths.length >= 1,
+      pth.data?.paths?.[0]?.desc);
   }
   {
     // 超管建一个临时账号，整份共享后应能看到超管的数据
@@ -110,14 +116,18 @@ async function main() {
 
     const tLogin = await reqAs('', 'POST', '/api/auth/login',
       { username: uname, password: 'test123' });
+    const tMe = await reqAs(tLogin.data.token, 'GET', '/api/auth/me');
+    ok('新账号自带「我」节点', !!tMe.data?.self_person?.id, tMe.data?.self_person?.name);
+
     const tList = await reqAs(tLogin.data.token, 'GET', '/api/persons');
     ok('被共享人能看整份数据', tList.status === 200 && tList.data.total >= 5,
       `${tList.data.total} 人`);
 
     const del = await req('DELETE', `/api/admin/shares/${share.data.id}`);
     const tList2 = await reqAs(tLogin.data.token, 'GET', '/api/persons');
-    ok('取消共享后立即失效', del.status === 200 && tList2.data.total === 0,
-      `${tList2.data.total} 人`);
+    const leftovers = (tList2.data.items || []).filter((p) => p.is_shared).length;
+    ok('取消共享后立即失效', del.status === 200 && leftovers === 0,
+      `${leftovers} 条共享数据（本人节点不计）`);
 
     const gone = await req('DELETE', `/api/admin/users/${newId}`);
     ok('超管删除账号', gone.status === 200);

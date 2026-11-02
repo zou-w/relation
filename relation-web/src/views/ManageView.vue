@@ -160,6 +160,7 @@ function blankForm() {
     phone: '',
     email: '',
     is_key_contact: false,
+    is_self: false,
     remark: '',
   };
 }
@@ -182,6 +183,7 @@ function openEdit(p) {
     phone: p.phone || '',
     email: p.email || '',
     is_key_contact: !!p.is_key_contact,
+    is_self: !!p.is_self,
     remark: p.remark || '',
   };
   // 补权力角色：列表接口不带，单独取详情
@@ -218,6 +220,10 @@ async function save() {
       payload.org_name = f.org_name.trim();
       payload.power_level = f.power_level || 'unknown';
     }
+
+    // 只有勾选状态变了才传，避免编辑本人节点时被误取消
+    if (!editing.value) payload.is_self = !!f.is_self;
+    else if (!!f.is_self !== !!editing.value.is_self) payload.is_self = !!f.is_self;
 
     // 清空手机号要显式传空串，undefined 会被后端当成"不修改"
     if (editing.value && !f.phone.trim() && editing.value.phone) payload.phone = '';
@@ -368,7 +374,7 @@ onMounted(() => {
           <div class="grow">
             <div class="row gap-6">
               <span class="p-name">{{ p.name }}</span>
-              <span v-if="p.is_self" class="tag tag--success">我</span>
+              <span v-if="p.is_self && p.name !== '我'" class="tag tag--success">我</span>
               <span v-if="p.is_key_contact" class="tag tag--warn">重点</span>
               <span v-if="p.attr_count" class="tag">{{ p.attr_count }} 资源</span>
               <span v-if="p.is_shared" class="tag tag--cross">共享</span>
@@ -471,6 +477,16 @@ onMounted(() => {
               <div class="muted" style="font-size: 12px">决策人、审批人这类要重点经营的人</div>
             </div>
             <van-switch v-model="form.is_key_contact" size="22px" />
+          </div>
+
+          <div class="switch-row">
+            <div>
+              <div class="field-label" style="margin: 0">这是我本人</div>
+              <div class="muted" style="font-size: 12px">
+                关系图与「怎么搭上线」都从这里出发，一个账号只有一个
+              </div>
+            </div>
+            <van-switch v-model="form.is_self" size="22px" :disabled="!!editing && !!editing.is_self" />
           </div>
 
           <label class="field" style="margin-top: 14px">

@@ -233,7 +233,7 @@ export function findPaths(targetId, maxHops = 2, ctx = null) {
   const pScope = personScope(ctx, 'p');
   // "我"优先取自己的本人节点；没有则取共享数据里的
   const self = get(
-    `SELECT p.id, p.name FROM persons p
+    `SELECT p.id, p.name, p.owner_id FROM persons p
       WHERE p.is_self = 1 AND ${pScope.sql}
       ORDER BY CASE WHEN p.owner_id = ? THEN 0 ELSE 1 END, p.id LIMIT 1`,
     [...pScope.params, ctx?.userId ?? '']
@@ -242,7 +242,9 @@ export function findPaths(targetId, maxHops = 2, ctx = null) {
     `SELECT p.id, p.name FROM persons p WHERE p.id = ? AND ${pScope.sql}`,
     [targetId, ...pScope.params]
   );
-  if (!self || !target) return { self, target, paths: [], crossList: [] };
+  if (!self || !target) {
+    return { self, target, hasSelf: !!self, reason: self ? 'no_target' : 'no_self', paths: [], crossList: [] };
+  }
 
   const paths = [];
   const rScope = relationScope(ctx, 'r');
@@ -304,7 +306,7 @@ export function findPaths(targetId, maxHops = 2, ctx = null) {
         strength: r.my_strength,
         influence: r.their_influence,
         score: (r.my_strength || 3) + (r.their_influence || 3),
-        desc: `我 → ${r.via_name}${r.via_org ? `(${r.via_org})` : ''} → ${targetName}`,
+        desc: `我 → ${r.via_name} → ${targetName}`,
       });
     }
     paths.sort((a, b) => (b.score || 99) - (a.score || 99));
@@ -357,7 +359,15 @@ export function findPaths(targetId, maxHops = 2, ctx = null) {
       };
     });
 
-  return { self, target, targetOrg: targetOrg || null, paths, crossList };
+  return {
+    self,
+    target,
+    targetOrg: targetOrg || null,
+    hasSelf: true,
+    reason: paths.length ? 'ok' : 'no_path',
+    paths,
+    crossList,
+  };
 }
 
 /** 按组织找抓手：某单位我能通过谁搭上线 */

@@ -58,11 +58,20 @@ router.post('/', (req, res) => {
   checkEnum('power_level', b.power_level, '权力角色');
   checkEnum('sensitivity', b.sensitivity, '涉敏等级');
 
+  // 「我」是触达路径的起点，一个账号只允许一个
+  const wantSelf = b.is_self === true || b.is_self === 1 || b.is_self === '1';
+  if (wantSelf) {
+    const exists = get('SELECT id FROM persons WHERE owner_id = ? AND is_self = 1', [req.ctx.userId]);
+    if (exists) {
+      return res.status(400).json({ error: '你已经有「我」这个节点了，不能重复创建' });
+    }
+  }
+
   const result = transaction(() => {
     const p = run(
       `INSERT INTO persons (name, title, gender, phone, wechat, email, birthday,
-                            met_way, is_key_contact, sensitivity, remark, owner_id)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
+                            met_way, is_key_contact, sensitivity, remark, is_self, owner_id)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
       [
         String(b.name).trim(),
         b.title || b.position || null,
@@ -75,6 +84,7 @@ router.post('/', (req, res) => {
         b.is_key_contact ? 1 : 0,
         b.sensitivity || 'normal',
         b.remark || null,
+        wantSelf ? 1 : 0,
         req.ctx.userId,
       ]
     );
@@ -168,6 +178,14 @@ router.patch('/:id', (req, res) => {
   if (b.is_key_contact !== undefined) set('is_key_contact', b.is_key_contact ? 1 : 0);
   if (b.sensitivity !== undefined) set('sensitivity', b.sensitivity);
   if (b.remark !== undefined) set('remark', b.remark);
+  if (b.is_self !== undefined) {
+    const on = b.is_self === true || b.is_self === 1 || b.is_self === '1';
+    if (on) {
+      // 换本人节点：同一个人只能有一个「我」
+      run('UPDATE persons SET is_self = 0 WHERE owner_id = ? AND id != ?', [exist.owner_id, id]);
+    }
+    set('is_self', on ? 1 : 0);
+  }
 
   // 任职变更
   if (b.org_name) {

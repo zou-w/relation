@@ -3,13 +3,18 @@ import { ref, onMounted, computed } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import { showToast, showConfirmDialog, showSuccessToast } from 'vant';
 import api from '@/api';
+import { useAuthStore } from '@/stores/auth';
 
 const route = useRoute();
 const router = useRouter();
+const auth = useAuthStore();
 
 const loading = ref(true);
 const person = ref(null);
 const paths = ref([]);
+const pathState = ref({ hasSelf: null, reason: '' });
+const pathFailed = ref(false);
+const creatingSelf = ref(false);
 const influencers = ref([]);
 const enums = ref({});
 
@@ -65,10 +70,14 @@ async function load() {
 
     // 并行拉路径与影响力，失败不影响主体
     Promise.all([
-      api.paths(id.value).catch(() => null),
+      api.paths(id.value).catch((e) => { pathFailed.value = true; return null; }),
       api.influencers(id.value).catch(() => null),
     ]).then(([pt, inf]) => {
       paths.value = pt?.paths || [];
+      pathState.value = {
+        hasSelf: pt ? pt.hasSelf !== false && !!pt.self : null,
+        reason: pt?.reason || (paths.value.length ? 'ok' : 'no_path'),
+      };
       influencers.value = inf?.items || [];
     });
   } catch (err) {
@@ -145,6 +154,25 @@ async function toggleKey() {
   }
 }
 
+/** 没有「我」节点时，就地补一个，搭线路径才有起点 */
+async function createSelfNode() {
+  creatingSelf.value = true;
+  try {
+    await api.createPerson({
+      name: auth.user?.display_name || auth.user?.username || '我',
+      title: '本人',
+      is_self: true,
+      remark: '关系网的中心节点',
+    });
+    showSuccessToast('已创建「我」的节点');
+    await load();
+  } catch (e) {
+    showToast(e.message);
+  } finally {
+    creatingSelf.value = false;
+  }
+}
+
 onMounted(load);
 </script>
 
@@ -175,7 +203,7 @@ onMounted(load);
             <div class="grow">
               <div class="row gap-6" style="flex-wrap: wrap">
                 <span class="profile-name">{{ person.name }}</span>
-                <span v-if="person.is_self" class="tag tag--success">我</span>
+                <span v-if="person.is_self && person.name !== '我'" class="tag tag--success">我</span>
                 <span v-if="person.is_key_contact" class="tag tag--warn">重点人物</span>
                 <span v-if="person.sensitivity === 'sensitive'" class="tag tag--danger">涉敏</span>
               </div>
@@ -277,6 +305,60 @@ onMounted(load);
           </div>
         </template>
 
+        <!-- 触达路径 -->
+        <template v-if="!person.is_self">
+          <div class="section-title">
+            怎么搭上线
+            <span v-if="paths.length" class="sec-hint">{{ paths.length }} 条</span>
+          </div>
+          <div v-if="paths.length" class="card list-card">
+            <div v-for="(p, i) in paths" :key="i" class="path-item">
+              <span class="path-hop" :class="{ 'path-hop--direct': p.hops === 1 }">
+                {{ p.hops === 1 ? '直达' : `${p.hops} 跳` }}
+              </span>
+              <div class="grow">
+                <div class="path-desc">
+                  {{ p.desc }}
+                  <span v-if="p.crossOrg" class="tag tag--cross" style="margin-left: 4px">跨单位</span>
+                </div>
+                <div class="muted path-sub" v-if="p.hops === 2">
+                  <span>
+                    我 ↔ {{ p.via.name }}{{ p.via.org ? `（${p.via.org}）` : '' }} ·
+                    {{ relationLabel[p.myRelation] || p.myRelation }}
+                  </span>
+                  <span>
+                    {{ p.via.name }} → 目标 · {{ relationLabel[p.theirRelation] || p.theirRelation }}
+                  </span>
+                </div>
+              </div>
+              <van-icon
+                v-if="p.via"
+                name="arrow"
+                class="path-go"
+                @click="router.push(`/person/${p.via.id}`)"
+              />
+            </div>
+          </div>
+
+          <div v-else-if="pathFailed" class="card empty-inline">
+            路径暂时算不出来，可能是网络或服务异常，稍后重试。
+          </div>
+
+          <div v-else-if="pathState.hasSelf === false" class="card empty-inline">
+            搭线路径要从「我」出发，你还没有自己的节点。<br />
+            <button class="mini-btn" :disabled="creatingSelf" @click="createSelfNode">
+              <van-icon name="plus" /> 创建「我」的节点
+            </button>
+          </div>
+
+          <div v-else class="card empty-inline">
+            你和 ta 之间还没有共同熟人，暂时算不出路径。<br />
+            <button class="mini-btn" @click="router.push(`/record-relation?with=${id}`)">
+              <van-icon name="exchange" /> 记录我和 ta 的关系
+            </button>
+          </div>
+        </template>
+
         <!-- 资源画像 -->
         <div class="section-title">
           资源画像
@@ -306,30 +388,6 @@ onMounted(load);
           还没有资源标签。给 ta 打上「能提供什么」，<br />以后「借资源」才搜得到。
         </div>
 
-        <!-- 触达路径 -->
-        <template v-if="!person.is_self">
-          <div class="section-title">怎么搭上线</div>
-          <div v-if="paths.length" class="card list-card">
-            <div v-for="(p, i) in paths" :key="i" class="path-item">
-              <span class="path-hop" :class="{ 'path-hop--direct': p.hops === 1 }">
-                {{ p.hops === 1 ? '直达' : `${p.hops} 跳` }}
-              </span>
-              <div class="grow">
-                <div class="path-desc">
-                  {{ p.desc }}
-                  <span v-if="p.crossOrg" class="tag tag--cross" style="margin-left: 4px">跨单位</span>
-                </div>
-                <div class="muted" v-if="p.hops === 2">
-                  我 ↔ {{ p.via.name }} {{ relationLabel[p.myRelation] || p.myRelation }} ·
-                  {{ p.via.name }} → 目标 {{ relationLabel[p.theirRelation] || p.theirRelation }}
-                </div>
-              </div>
-            </div>
-          </div>
-          <div v-else class="card empty-inline">
-            暂时找不到经过熟人搭线的路径，<br />可以先从熟人关系入手。
-          </div>
-        </template>
 
         <!-- 影响力 -->
         <template v-if="influencers.length && !person.is_self">
@@ -753,4 +811,30 @@ onMounted(load);
 }
 
 .chip--on { background: var(--c-primary-light); border-color: var(--c-primary); color: var(--c-primary); font-weight: 600; }
+
+/* 触达路径 */
+.sec-hint {
+  float: right;
+  font-size: 12px;
+  font-weight: 400;
+  color: var(--c-text-3);
+}
+
+.path-sub span { display: block; }
+
+.path-go {
+  align-self: center;
+  color: var(--c-text-3);
+  cursor: pointer;
+  padding: 4px;
+}
+
+.empty-inline .mini-btn {
+  float: none;
+  margin: 10px auto 0;
+  padding: 5px 14px;
+  border: 1px solid var(--c-primary);
+  border-radius: 999px;
+  background: #fff;
+}
 </style>

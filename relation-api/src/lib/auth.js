@@ -86,6 +86,23 @@ export function createUser({
   return get('SELECT * FROM users WHERE id = ?', [info.lastInsertRowid]);
 }
 
+/**
+ * 每个账号都需要一个「我」节点：
+ * 关系图的中心、触达路径（我→A→B）的起点都靠它。
+ * 已有则复用，避免重复创建。
+ */
+export function ensureSelfPerson(userId, displayName = '我') {
+  const uid = String(userId);
+  const exists = get('SELECT id FROM persons WHERE owner_id = ? AND is_self = 1', [uid]);
+  if (exists) return exists.id;
+  const info = run(
+    `INSERT INTO persons (name, title, is_self, owner_id, remark)
+     VALUES (?,?,1,?,?)`,
+    [String(displayName || '我').trim() || '我', '本人', uid, '关系网的中心节点']
+  );
+  return info.lastInsertRowid;
+}
+
 /** 登录：账号 + 口令 → 会话 token */
 export function login({ username, password, userAgent, ip } = {}) {
   const user = get('SELECT * FROM users WHERE username = ? COLLATE NOCASE', [String(username || '').trim()]);

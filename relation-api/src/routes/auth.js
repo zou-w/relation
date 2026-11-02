@@ -4,7 +4,7 @@
 import { Router } from 'express';
 import { all, get, run } from '../db/driver.js';
 import {
-  login, createUser, logout, changePassword, publicUser, getUserByToken,
+  login, createUser, logout, changePassword, publicUser, getUserByToken, ensureSelfPerson,
 } from '../lib/auth.js';
 import { authRequired } from '../middleware/auth.js';
 
@@ -23,6 +23,8 @@ router.post('/register', (req, res, next) => {
       remark: b.remark || null,
       createdBy: 'register',
     });
+    // 注册即建「我」节点，关系图与搭线路径立刻可用
+    ensureSelfPerson(user.id, user.display_name || user.username);
     // 注册即登录，少一次输入
     const session = login({
       username: user.username,
@@ -69,8 +71,14 @@ router.get('/me', authRequired, (req, res) => {
     [uid, uid, uid]
   );
 
+  const selfPerson = get(
+    'SELECT id, name FROM persons WHERE owner_id = ? AND is_self = 1 ORDER BY id LIMIT 1',
+    [uid]
+  );
+
   res.json({
     user: publicUser(req.user),
+    self_person: selfPerson || null,
     stats: {
       own_persons: ownPersons,
       shared_persons: sharedPersons,
