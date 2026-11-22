@@ -508,6 +508,52 @@ crontab -e
 
 > SQLite 开了 WAL 模式，备份时建议用 `sqlite3 relation.db ".backup /path/backup.db"` 更安全。
 
+### 6. 线上实例（已部署）
+
+当前生产环境，供后续维护对照：
+
+| 项 | 值 |
+|---|---|
+| 访问地址 | https://zouwen.top |
+| 服务器 | 8.137.102.34（阿里云，CentOS 8） |
+| SSH 端口 | **8703**（不是 22） |
+| 代码目录 | `/www/wwwroot/zouwen.top/app` |
+| 数据库 | `/www/wwwroot/zouwen.top/relation-data/relation.db` |
+| 进程管理 | PM2，进程名 `relation-api`，监听 `127.0.0.1:3100` |
+| 前端产物 | `/www/wwwroot/zouwen.top/app/relation-web/dist` |
+| Nginx 配置 | `/www/server/panel/vhost/nginx/zouwen.top.conf` |
+| 证书 | Let's Encrypt，`/www/server/panel/vhost/cert/zouwen.top/` |
+| 备份 | 每日 03:00 到 `app/backup/`，保留 30 天 |
+| 健康守护 | 每 5 分钟跑 `relation-data/guard.sh`，挂了自动重启 |
+
+**更新流程**（代码已推到 GitHub 后）：
+
+```bash
+ssh -p 8703 root@8.137.102.34
+cd /www/wwwroot/zouwen.top/app
+
+# 0. 先备份（.env 不在 git 里，但要单独留一份）
+TS=$(date +%Y%m%d-%H%M%S)
+sqlite3 /www/wwwroot/zouwen.top/relation-data/relation.db ".backup app/backup/relation-clean-$TS.db"
+cp relation-api/.env app/backup/env-$TS.txt
+
+# 1. 同步代码
+git fetch origin && git reset --hard origin/main
+
+# 2. 前端只有改动才需要构建
+cd relation-web && npm run build && cd ..
+
+# 3. 重启
+pm2 restart relation-api --update-env
+curl -s localhost:3100/api/health
+```
+
+> 服务器上的 `git status` 会显示几十个文件「已修改」，那是 Windows/服务器换行符差异（插入删除行数完全对称），不是真实改动，`reset --hard` 可以放心执行。
+>
+> `.env` 被 `.gitignore` 排除，`reset --hard` 不会删它，但误删后 `guard.sh` 会从 `relation-data/env.backup` 自动还原。
+
+**待补**：`www.zouwen.top` 的 DNS 已解析，但证书只签了 `zouwen.top` 的裸域，所以 www 暂时不能访问。要支持需重新签一张含两个域名的证书（服务器上目前没装 acme.sh / certbot，装在宝塔面板的 SSL 里操作最省事）。
+
 ---
 
 ## 九、安全与合规
