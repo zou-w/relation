@@ -79,6 +79,33 @@ async function onProjectSaved() {
   await load();
 }
 
+/* ---------------- 删除项目 ---------------- */
+const deleting = ref(false);
+
+async function removeProject() {
+  const name = project.value?.name || '这个项目';
+  try {
+    await showConfirmDialog({
+      title: '删除项目',
+      message: `确定删除「${name}」？参与人关联会一起解除，联系人本身不会被删除。`,
+      confirmButtonText: '删除',
+      confirmButtonColor: '#dc2626',
+    });
+  } catch {
+    return; // 取消
+  }
+  deleting.value = true;
+  try {
+    await api.deleteProject(id);
+    showSuccessToast('项目已删除');
+    router.replace('/projects');
+  } catch (e) {
+    showToast(e.message);
+  } finally {
+    deleting.value = false;
+  }
+}
+
 /* ---------------- 加人 ---------------- */
 const addOpen = ref(false);
 const candidates = ref([]);
@@ -207,8 +234,16 @@ onMounted(async () => {
         <div class="row gap-8 head-row">
           <van-icon name="arrow-left" size="20" class="back" @click="router.back()" />
           <span class="head-title">项目详情</span>
-          <button v-if="project" class="edit-link" @click="editOpen = true">
+          <button v-if="project?.can_edit" class="edit-link" @click="editOpen = true">
             <van-icon name="edit" /> 编辑
+          </button>
+          <button
+            v-if="project?.can_edit"
+            class="del-link"
+            :disabled="deleting"
+            @click="removeProject"
+          >
+            <van-icon name="delete-o" /> {{ deleting ? '删除中' : '删除' }}
           </button>
         </div>
       </div>
@@ -467,6 +502,15 @@ onMounted(async () => {
   color: var(--c-primary);
   font-size: 13px; font-family: inherit; cursor: pointer;
 }
+
+.del-link {
+  display: inline-flex; align-items: center; gap: 3px;
+  border: 0; background: none; padding: 0;
+  color: #dc2626;
+  font-size: 13px; font-family: inherit; cursor: pointer;
+}
+
+.del-link:disabled { opacity: 0.5; }
 
 .loading { display: flex; justify-content: center; padding: 60px 0; }
 

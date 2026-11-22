@@ -91,6 +91,15 @@ async function main() {
     const adminDeny = await reqAs(demoToken, 'GET', '/api/admin/users');
     ok('普通账号不能进后台', adminDeny.status === 403, `HTTP ${adminDeny.status}`);
 
+    const demoProjects = await reqAs(demoToken, 'GET', '/api/projects');
+    const sharedProj = (demoProjects.data.items || []).find((p) => p.can_edit === false);
+    if (sharedProj) {
+      const denyDel = await reqAs(demoToken, 'DELETE', `/api/projects/${sharedProj.id}`);
+      ok('共享项目不能删除', denyDel.status === 403, `HTTP ${denyDel.status}`);
+    } else {
+      ok('共享项目不能删除', false, '没有共享项目可测');
+    }
+
     const graph = await reqAs(demoToken, 'GET', '/api/graph');
     const labels = graph.data.nodes.filter((n) => n.kind === 'person').map((n) => n.label);
     ok('图谱同样按账号隔离', graph.data.nodes.length > 0 && !labels.includes('赵敏'),
@@ -427,6 +436,12 @@ async function main() {
   }
 
   console.log('\n【项目】');
+  {
+    const { status, data } = await req('GET', '/api/projects');
+    ok('项目列表带编辑权限标记',
+      status === 200 && data.items.length > 0 && data.items.every((p) => p.can_edit === true),
+      `${data.items.filter((p) => p.can_edit).length}/${data.items.length} 可编辑`);
+  }
   let projectId = null;
   let memberId = null;
   {

@@ -57,6 +57,8 @@ router.get('/', (req, res) => {
 
   const items = findProjects({ ...opts, limit: size, offset: skip }, req.ctx).map((p) => ({
     ...p,
+    // 共享来的项目只读，前端据此隐藏编辑/删除入口
+    can_edit: !!req.ctx?.isAdmin || String(p.owner_id) === String(req.ctx?.userId ?? ''),
     status_label: enumLabel('project_status', p.status),
     project_type_label: enumLabel('project_type', p.project_type),
   }));

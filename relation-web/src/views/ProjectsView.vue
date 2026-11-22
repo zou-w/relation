@@ -5,7 +5,7 @@
  */
 import { ref, onMounted } from 'vue';
 import { useRouter } from 'vue-router';
-import { showToast } from 'vant';
+import { showToast, showConfirmDialog, showSuccessToast } from 'vant';
 import api from '@/api';
 import ProjectFormSheet from '@/components/ProjectFormSheet.vue';
 
@@ -102,6 +102,47 @@ function goDetail(p) {
   router.push(`/project/${p.id}`);
 }
 
+/* ---------------- 卡片菜单：编辑 / 删除 ---------------- */
+const manageTarget = ref(null);
+const actionsOpen = ref(false);
+const actions = [
+  { name: '编辑项目', key: 'edit' },
+  { name: '删除项目', key: 'delete', color: '#dc2626' },
+];
+
+function openActions(p) {
+  manageTarget.value = p;
+  actionsOpen.value = true;
+}
+
+async function removeProject(p) {
+  try {
+    await showConfirmDialog({
+      title: '删除项目',
+      message: `确定删除「${p.name}」？参与人关联会一起解除，联系人本身不会被删除。`,
+      confirmButtonText: '删除',
+      confirmButtonColor: '#dc2626',
+    });
+  } catch {
+    return;
+  }
+  try {
+    await api.deleteProject(p.id);
+    showSuccessToast('项目已删除');
+    await Promise.all([load(), loadStats()]);
+  } catch (e) {
+    showToast(e.message);
+  }
+}
+
+async function onAction(action) {
+  actionsOpen.value = false;
+  const p = manageTarget.value;
+  if (!p) return;
+  if (action.key === 'edit') openEdit(p);
+  else if (action.key === 'delete') await removeProject(p);
+}
+
 onMounted(() => {
   load();
   loadStats();
@@ -173,6 +214,14 @@ onMounted(() => {
             <span class="st" :class="statusMeta[p.status]?.cls">{{ statusMeta[p.status]?.label || p.status }}</span>
             <span v-if="p.is_key" class="st st--key"><van-icon name="star" /> 重点</span>
             <span v-if="p.code" class="proj-code">{{ p.code }}</span>
+            <button
+              v-if="p.can_edit"
+              class="more-btn"
+              aria-label="项目操作"
+              @click.stop="openActions(p)"
+            >
+              <van-icon name="ellipsis" />
+            </button>
           </div>
 
           <div class="proj-name">{{ p.name }}</div>
@@ -204,6 +253,14 @@ onMounted(() => {
         </div>
       </div>
     </div>
+
+    <van-action-sheet
+      v-model:show="actionsOpen"
+      :actions="actions"
+      cancel-text="取消"
+      close-on-click-action
+      @select="onAction"
+    />
 
     <ProjectFormSheet v-model:show="sheetOpen" :project="editing" @saved="onSaved" />
   </div>
@@ -294,6 +351,18 @@ onMounted(() => {
 .st--closed { background: #f1f5f9; color: #64748b; }
 .st--lost { background: #fef2f2; color: #dc2626; }
 .st--key { background: var(--c-warning-light); color: var(--c-warning); }
+
+.more-btn {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  border: 0;
+  background: none;
+  padding: 2px 2px;
+  color: var(--c-text-3);
+  font-size: 18px;
+  cursor: pointer;
+}
 
 .proj-code {
   margin-left: auto;
