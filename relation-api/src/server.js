@@ -48,7 +48,10 @@ async function bootstrap() {
     res.on('finish', () => {
       const ms = Date.now() - start;
       if (!req.url.startsWith('/api/health')) {
-        console.log(`${res.statusCode} ${req.method} ${decodeURIComponent(req.originalUrl)} ${ms}ms`);
+        // 日志是旁路逻辑，畸形 URL 不能让它抛错（曾出现 URIError 刷满错误日志）
+        let url = req.originalUrl;
+        try { url = decodeURIComponent(url); } catch { /* 解码失败就用原始串 */ }
+        console.log(`${res.statusCode} ${req.method} ${url} ${ms}ms`);
       }
     });
     next();

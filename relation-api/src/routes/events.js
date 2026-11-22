@@ -61,7 +61,9 @@ router.get('/', (req, res) => {
              LEFT JOIN organizations o ON o.id = ce.org_id
              WHERE ${personScope(req.ctx, 'p').sql}`;
   const params = [...personScope(req.ctx, 'p').params];
-  if (person_id) { sql += ' AND ce.person_id = ?'; params.push(Number(person_id)); }
+  // 传了非数字的 id 直接当没有筛选，别把它塞进 SQL 触发 datatype mismatch
+  const pid = Number(person_id);
+  if (person_id && Number.isFinite(pid)) { sql += ' AND ce.person_id = ?'; params.push(pid); }
   sql += ' ORDER BY ce.event_date DESC LIMIT ?';
   params.push(Math.min(Number(limit) || 50, 200));
   res.json({ items: all(sql, params) });
