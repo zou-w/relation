@@ -124,7 +124,13 @@ router.post('/execute', rawBody, async (req, res, next) => {
         continue;
       }
       if (r.action === 'update' && mode === 'skip') {
-        results.push({ rowNumber: r.rowNumber, name: r.data.name, result: 'skipped', message: '已存在，按策略跳过', id: r.matchedId });
+        results.push({
+          rowNumber: r.rowNumber,
+          name: r.data.name,
+          result: 'skipped',
+          message: '库里已有同一人（姓名 + 性别 + 电话相同），已跳过',
+          id: r.matchedId,
+        });
         continue;
       }
 

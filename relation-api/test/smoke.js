@@ -32,6 +32,28 @@ async function reqAs(token, method, path, body) {
   return { status: r.status, data };
 }
 
+/**
+ * 在模板基础上填几行数据，返回 xlsx Buffer
+ * @param {Buffer} tpl 模板文件
+ * @param {Array<[name, phone, gender, orgName]>} rows
+ */
+async function buildXlsx(tpl, rows) {
+  const { default: ExcelJS } = await import('exceljs');
+  const wb = new ExcelJS.Workbook();
+  await wb.xlsx.load(tpl);
+  const ws = wb.worksheets[0];
+  // 列序：A姓名 B单位 C职务 D部门 E权力角色 F手机 G微信 H邮箱 I性别 ...
+  rows.forEach(([name, phone, gender, orgName], i) => {
+    const row = ws.getRow(4 + i);
+    row.getCell(1).value = name || null;
+    row.getCell(2).value = orgName || null;
+    row.getCell(6).value = phone || null;
+    row.getCell(9).value = gender || null;
+    row.commit();
+  });
+  return Buffer.from(await wb.xlsx.writeBuffer());
+}
+
 async function req(method, path, body) {
   return reqAs(TOKEN, method, path, body);
 }
@@ -378,6 +400,14 @@ async function main() {
     const { status, data } = await req('GET', '/api/graph/stats');
     ok('统计概览', status === 200 && data.persons >= 5,
       `联系人 ${data?.persons} · 组织 ${data?.orgs} · 待办 ${data?.pending}`);
+
+    // 单位数只算「挂了联系人」的单位，空单位不计
+    const orgRes = await req('GET', '/api/orgs?limit=200');
+    const orgItems = orgRes.data?.items || [];
+    const nonEmpty = orgItems.filter((o) => o.person_count > 0).length;
+    ok('空单位不计入单位数',
+      data.orgs === nonEmpty && orgItems.some((o) => o.person_count === 0),
+      `统计 ${data.orgs} / 非空 ${nonEmpty} / 共 ${orgItems.length} 个单位`);
   }
 
   // ---------- 清理 ----------
@@ -433,6 +463,64 @@ async function main() {
   {
     const { status, data } = await raw('/api/import/execute', tplBuf);
     ok('空表导入被拒', status === 400, data?.error);
+  }
+  {
+    // 同名同性别同电话 = 同一个人；任一项不同就是两个人
+    // 张建国(男, 13800001111) 是种子数据里已有的
+    const rows = [
+      ['张建国', '13800001111', '男', 'A 完全重复'],
+      ['张建国', '13900139999', '男', 'B 同姓名同性别不同电话'],
+      ['张建国', '13800001111', '女', 'C 同姓名同电话不同性别'],
+      ['张 建 国', '138-0000-1111', '男', 'D 空格与横杠干扰'],
+      ['导入新同事', '13700137777', '男', 'E 全新的人'],
+      ['导入新同事', '13700137777', '男', 'F 文件内重复'],
+    ];
+    const buf = await buildXlsx(tplBuf, rows);
+    const { status, data } = await raw('/api/import/preview', buf);
+    const list = data?.rows || [];
+    const act = (i) => list[i]?.action;
+
+    ok('导入预检可解析构造的表', status === 200 && list.length === rows.length,
+      `${list.length} 行`);
+
+    // 行序：4~9
+    ok('姓名+性别+电话全同 → 判为已存在', act(0) === 'update',
+      `行4 ${act(0)}`);
+    ok('同名同性别但电话不同 → 当作新人', act(1) === 'create',
+      `行5 ${act(1)}`);
+    ok('同名同电话但性别不同 → 当作新人', act(2) === 'create',
+      `行6 ${act(2)}`);
+    ok('空格和电话横杠不影响判重', act(3) === 'duplicate-in-file',
+      `行7 ${act(3)}`);
+    ok('全新联系人正常新增', act(4) === 'create', `行8 ${act(4)}`);
+    ok('文件内同一个人只留第一行', act(5) === 'duplicate-in-file', `行9 ${act(5)}`);
+
+    ok('重复计数正确',
+      data?.summary?.update === 1 && data?.summary?.duplicateInFile === 2,
+      `已存在 ${data?.summary?.update} · 文件内重复 ${data?.summary?.duplicateInFile}`);
+  }
+  {
+    // 执行导入，默认 skip：重复的一行都不能写进去
+    const before = (await req('GET', '/api/persons')).data.total;
+    const rows = [
+      ['张建国', '13800001111', '男', '重复'],
+      ['导入测试唯一人', '13700138888', '男', '新人'],
+    ];
+    const buf = await buildXlsx(tplBuf, rows);
+    const { status, data } = await raw('/api/import/execute', buf);
+    ok('重复数据不写入库',
+      status === 200 && data?.summary?.created === 1 && data?.summary?.skipped === 1,
+      `新增 ${data?.summary?.created} · 跳过 ${data?.summary?.skipped}`);
+
+    const after = (await req('GET', '/api/persons')).data;
+    ok('人员总数只加 1', after.total === before + 1, `${before} → ${after.total}`);
+    const dupes = after.items.filter((p) => p.name === '张建国');
+    ok('同名不同人可共存', dupes.length >= 1, `张建国 ${dupes.length} 条`);
+
+    // 清理导入进来的人
+    for (const p of after.items) {
+      if (p.name === '导入测试唯一人') await req('DELETE', `/api/persons/${p.id}`);
+    }
   }
 
   console.log('\n【项目】');

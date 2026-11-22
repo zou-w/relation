@@ -270,7 +270,7 @@ onMounted(async () => {
 
           <!-- 重复策略 -->
           <div v-if="summary.update > 0" class="card strategy">
-            <div class="strategy-title">有 {{ summary.update }} 位已存在（姓名 + 单位相同）</div>
+            <div class="strategy-title">有 {{ summary.update }} 位已存在（姓名 + 性别 + 电话相同）</div>
             <div class="strategy-opts">
               <button
                 class="strategy-opt"

@@ -670,7 +670,14 @@ export function stats(ctx = null) {
   return {
     persons: one(`SELECT COUNT(*) FROM persons p WHERE p.is_self = 0 AND ${p.sql}`, p.params),
     keyContacts: one(`SELECT COUNT(*) FROM persons p WHERE p.is_key_contact = 1 AND ${p.sql}`, p.params),
-    orgs: one(`SELECT COUNT(*) FROM organizations o WHERE ${o.sql}`, o.params),
+    // 只算“有联系人”的单位：挂了 0 个人的空单位不计入，否则首页数字会对不上
+    orgs: one(
+      `SELECT COUNT(*) FROM organizations o
+        WHERE ${o.sql}
+          AND EXISTS (SELECT 1 FROM employments e JOIN persons p2 ON p2.id = e.person_id
+                       WHERE e.org_id = o.id AND e.is_current = 1 AND ${personScope(ctx, 'p2').sql})`,
+      [...o.params, ...personScope(ctx, 'p2').params]
+    ),
     relations: one(`SELECT COUNT(*) FROM relations r WHERE ${r.sql}`, r.params),
     events: one(
       `SELECT COUNT(*) FROM contact_events ce JOIN persons p ON p.id = ce.person_id WHERE ${p.sql}`,

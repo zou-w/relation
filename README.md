@@ -241,7 +241,7 @@ DELETE /api/relations/:id          删除
 GET    /api/relations/org          组织间关系
 POST   /api/relations/org          建立组织关系
 
-GET  /api/orgs?q=                  组织搜索（支持简称）
+GET  /api/orgs?q=                  组织搜索（支持简称；person_count 按当前账号可见联系人计）
 POST /api/orgs                     新建组织
 GET  /api/orgs/:id                 组织详情（含在任人员）
 
@@ -285,7 +285,7 @@ GET    /api/projects/:id/candidates           可选人员池（标记谁已加�
 GET    /api/projects/:id/graph                单项目局部关系网
 ```
 
-**共 60 个接口，冒烟测试 89 项全部通过。**
+**共 60 个接口，冒烟测试 101 项全部通过。**
 
 ---
 
@@ -322,6 +322,21 @@ GET    /api/projects/:id/graph                单项目局部关系网
 - 路径会算出「我 → 中间人 → 目标」，跨单位的那条优先排前面，点右侧箭头可直接跳到中间人
 - 没有路径时给出可操作的下一步（记录我和 ta 的关系），不再是一句空的「找不到」
 
+### 单位数统计口径
+
+首页和管理页顶部的「单位」数字，只统计**至少挂了一个联系人**的单位：
+
+```sql
+SELECT COUNT(*) FROM organizations o
+ WHERE <可见性条件>
+   AND EXISTS (SELECT 1 FROM employments e JOIN persons p2 ON p2.id = e.person_id
+                WHERE e.org_id = o.id AND e.is_current = 1 AND <p2 可见>)
+```
+
+- 从单位输入框新建、但还没加人的单位不计入，避免「刚打了个单位名，数字就涨了」
+- 单位列表里的 `person_count` 同样按当前账号可见的联系人算，共享场景下不会显示别人的数字
+- 单位本身仍保留在库里，加人之后数字自动跟上
+
 ### Excel 导入向导（`/import`）
 
 三步走，**预检不写库**，确认后才真正落盘。
@@ -347,7 +362,8 @@ GET    /api/projects/:id/graph                单项目局部关系网
 
 **判重与写入**
 
-- 按「姓名 + 单位」判断是否已有；命中则可选 **跳过**（默认，保留现有资料）或 **更新**（只覆盖表格里填了的内容）
+- 按「姓名 + 性别 + 电话」判断是否已有：三者都相同才算同一个人（姓名忽略空格，电话只比数字）。命中时可选择 **跳过**（默认，保留现有资料）或 **更新**（只覆盖表格里填了的内容）
+- 同名但性别或电话不同，当作两个人分别导入；文件内有多行命中同一人时，只保留第一行
 - 文件内重复行自动识别，第二行起跳过，不会重复入库
 - 单位不存在时自动创建；资源标签按 `、` `,` `；` `/` 切分，每条落成一条 resource 画像，**已存在的标签不会重复追加**
 - 写入在事务里逐行执行，单行失败不影响其他行，最后给出「新增/更新/跳过/失败」四项计数和失败明细
@@ -641,7 +657,7 @@ Excel 导入 ✅ 模板下载(28KB) / 中文件名 / 字段清单 / 空表拒绝
 批量管理   ✅ 空 ids 拒绝 / 本人节点保护
 清理       ✅ 级联删除
 
-89/89 通过
+101/101 通过
 ```
 
 实测输出示例：
@@ -692,7 +708,7 @@ relation-api/
 │   ├── middleware/auth.js  Bearer 校验 / 超管校验
 │   └── routes/             auth / admin / persons / resources / events / orgs
 │                           relations / graph / import / projects
-└── test/smoke.js           89 项冒烟测试
+└── test/smoke.js           101 项冒烟测试
 
 docs/
 └── import-template.xlsx    导入模板快照（权威版本以 API 为准）

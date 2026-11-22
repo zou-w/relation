@@ -11,9 +11,31 @@ import { COLUMNS } from './excel-template.js';
 import { enumKey, enumLabels } from './enums.js';
 import { all } from '../db/driver.js';
 import { personScope } from './scope.js';
+import { decrypt } from './crypto.js';
 
 const MAX_ROWS = 500;
 const MAX_ATTRS = 8;
+
+/**
+ * 判重键：姓名 + 性别 + 电话
+ *
+ * 同名同性别同电话视为同一个人，只有其中一项不同就当两个人。
+ * - 姓名去掉所有空白（「张 建 国」和「张建国」是同一个人）
+ * - 性别统一成 male/female/unknown，没填按 unknown
+ * - 电话只留数字，库里存的是密文，所以先解密再比
+ */
+function dupKey(name, gender, phone) {
+  const n = String(name || '').replace(/\s+/g, '');
+  const g = gender || 'unknown';
+  const p = String(phone || '').replace(/\D/g, '');
+  return `${n}||${g}||${p}`;
+}
+
+/** 判重命中时给人看的说明，例如「张建国 · 男 · 13800138000」 */
+function describeDup(data) {
+  const g = { male: '男', female: '女' }[data.gender] || '性别未填';
+  return `${data.name} · ${g} · ${data.phone || '电话未填'}`;
+}
 
 /* ============================================================
  * 单元格取值：兼容富文本、超链接、公式、日期、数字
@@ -192,14 +214,16 @@ export async function parseWorkbook(buffer, { checkDuplicate = true, ctx = null 
   if (checkDuplicate) {
     const ps = personScope(ctx, 'p');
     const rows = all(`
-      SELECT p.id, p.name,
-             (SELECT o.name FROM employments e JOIN organizations o ON o.id = e.org_id
-              WHERE e.person_id = p.id AND e.is_current = 1 LIMIT 1) AS org_name
+      SELECT p.id, p.name, p.gender, p.phone
         FROM persons p
        WHERE p.is_self = 0 AND ${ps.sql}
     `, ps.params);
     for (const r of rows) {
-      existingIndex.set(`${(r.name || '').trim()}||${(r.org_name || '').trim()}`, r.id);
+      // 手机号在库里是密文，比之前先解密；解不开就当没有号
+      let phone = '';
+      try { phone = decrypt(r.phone) || ''; } catch { phone = ''; }
+      const k = dupKey(r.name, r.gender, phone);
+      if (!existingIndex.has(k)) existingIndex.set(k, r.id);
     }
   }
 
@@ -264,31 +288,28 @@ export async function parseWorkbook(buffer, { checkDuplicate = true, ctx = null 
       warnings.push(`资源标签超过 ${MAX_ATTRS} 个，只保留前 ${MAX_ATTRS} 个`);
     }
 
-    /* ---- 判重 ---- */
+    /* ---- 判重：姓名 + 性别 + 电话 ---- */
     let action = 'create';
     let matchedId = null;
 
     if (data.name) {
-      const key = `${data.name}||${data.org_name || ''}`;
+      const key = dupKey(data.name, data.gender, data.phone);
+      const dupLabel = describeDup(data);
+
       const fileHit = seenInFile.get(key);
       if (fileHit) {
         action = 'duplicate-in-file';
-        warnings.push(`与第 ${fileHit} 行重复（姓名 + 单位相同）`);
+        warnings.push(`与第 ${fileHit} 行重复（${dupLabel}）`);
       } else {
         seenInFile.set(key, rowNumber);
       }
 
       if (action === 'create' && checkDuplicate) {
-        // 先按「姓名 + 单位」精确匹配
-        let hit = existingIndex.get(key);
-        // 退一步：同名且单位都为空的
-        if (!hit) {
-          const nameOnly = [...existingIndex.entries()].find(([k]) => k.startsWith(`${data.name}||`));
-          if (nameOnly && !data.org_name) hit = nameOnly[1];
-        }
+        const hit = existingIndex.get(key);
         if (hit) {
           action = 'update';
           matchedId = hit;
+          warnings.push(`库里已有同一人（${dupLabel}），按更新处理`);
         }
       }
     }

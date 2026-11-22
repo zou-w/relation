@@ -27,7 +27,7 @@ export const COLUMNS = [
     header: '姓名',
     required: true,
     width: 14,
-    hint: '必填。填真实姓名，导入时按「姓名 + 单位」判断是否重复。',
+    hint: '必填。填真实姓名。姓名、性别、电话三者都相同才算重复，导入时自动跳过。',
     example: '张建国',
   },
   {

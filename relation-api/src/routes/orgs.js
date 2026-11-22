@@ -11,12 +11,14 @@ const router = Router();
 /** 组织列表 / 搜索 */
 router.get('/', (req, res) => {
   const { q, org_type, limit } = req.query;
+  const ps = personScope(req.ctx, 'p2');
+  // 人数按当前账号可见的联系人算，避免共享场景下看到别人的数字
   let sql = `SELECT o.*,
-                    (SELECT COUNT(*) FROM employments e
-                     WHERE e.org_id = o.id AND e.is_current = 1) AS person_count,
+                    (SELECT COUNT(*) FROM employments e JOIN persons p2 ON p2.id = e.person_id
+                     WHERE e.org_id = o.id AND e.is_current = 1 AND ${ps.sql}) AS person_count,
                     (SELECT name FROM organizations po WHERE po.id = o.parent_org_id) AS parent_name
              FROM organizations o WHERE ${orgScope(req.ctx, 'o').sql}`;
-  const params = [...orgScope(req.ctx, 'o').params];
+  const params = [...ps.params, ...orgScope(req.ctx, 'o').params];
   if (q) {
     sql += ' AND (o.name LIKE ? OR o.alias LIKE ? OR o.business LIKE ?)';
     const kw = `%${q}%`;
